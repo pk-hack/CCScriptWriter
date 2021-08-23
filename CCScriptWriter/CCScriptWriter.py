@@ -218,7 +218,7 @@ def grey_replace(ccScriptCommand, before, after, maxdist, block, replaceFunc):
 
 def grey_replaceByteArgs(byteArgs, ccScriptCommand):
     # eventually
-    ret = ccScriptCommand + "("
+    ret = "{" + ccScriptCommand + "("
     
     # split
     bArgs = byteArgs.split()
@@ -233,7 +233,7 @@ def grey_replaceByteArgs(byteArgs, ccScriptCommand):
         ret = ret + str(int(bArgs[i], 16))
 
     # end paren
-    ret = ret + ")"
+    ret = ret + ")}"
 
     # done
     return ret
@@ -499,7 +499,7 @@ class CCScriptWriter:
                 for r in RE_REPLACE:
                     b = re.sub(r, self.replaceWithCCScript, b)
                 b = grey_replace_all(b)
-
+                
             self.dialogue[block][0] = b
 
     # Outputs the processed dialogue to the specified output directory.
