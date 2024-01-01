@@ -641,7 +641,7 @@ class CCScriptWriter:
                     block += "[{}".format(FormatHex(c))
 
                     # Mark if we expect an [02] before the end of the block
-                    if c == 0x19:
+                    if c == 0x19 and self.data[i + 1] == 0x02:
                         normal_block_expect_02 = True
 
                     # Get the rest of the control code.
