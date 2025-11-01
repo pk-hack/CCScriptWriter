@@ -1,4 +1,4 @@
-#! /usr/bin/env python
+#!/usr/bin/env python
 # CCScriptWriter
 # Extracts the dialogue from EarthBound and outputs it into a CCScript file.
 
@@ -130,27 +130,36 @@ def FindClosest(dictionary, searchKey):
 # Format a hex number to a control code format.
 def FormatHex(intNum):
 
-    hexNum = hex(intNum).lstrip("0x").upper()
-    if not hexNum:
-        hexNum = "00"
-    elif len(hexNum) == 1:
-        hexNum = "0{}".format(hexNum)
-    return hexNum
+    return '{:02X}'.format(intNum)
 
 # Converts an SNES address to a hexadecimal address.
 def FromSNES(snesNum):
 
-    if snesNum.count("0") == 8:
-        return 0
     return int("".join(reversed(snesNum.strip().split())), 16)
+
+def test_FromSNES():
+    assert 0 == FromSNES('00 00 00 00')
+    assert 1 == FromSNES('01 00 00 00')
+    assert 256 == FromSNES('00 01 00 00')
+    assert 0x0001_0000 == FromSNES('00 00 01 00')
+    assert 0x0100_0000 == FromSNES('00 00 00 01')
+    assert 0xcafe_f00d == FromSNES('0D F0 FE CA')
+    assert 0xcafe_f00d == FromSNES('0d f0 fe ca')
 
 # Converts a hexadecimal address to an SNES address.
 def ToSNES(hexNum):
 
     if hexNum == 0:
         return "00 00 00 00"
-    h = hex(hexNum).lstrip("0x").upper()
-    return " ".join(reversed(re.findall("\w\w", "{0:0>8}".format(h))))
+    return " ".join(reversed(re.findall(r"\w\w", "{:08X}".format(hexNum))))
+
+def test_ToSNES():
+    assert ToSNES(0) == '00 00 00 00'
+    assert ToSNES(1) == '01 00 00 00'
+    assert ToSNES(256) == '00 01 00 00'
+    assert ToSNES(0x0001_0000) == '00 00 01 00'
+    assert ToSNES(0x0100_0000) == '00 00 00 01'
+    assert ToSNES(0xcafe_f00d) == '0D F0 FE CA'
 
 ########################################
 # Arg matching + replacement functions #
