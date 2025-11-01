@@ -48,6 +48,13 @@ CONTROL_CODES = {0x00: 0, 0x01: 0, 0x02: 0, 0x03: 0, 0x04: 2, 0x05: 2, 0x06: 6,
                  0x25: 0, 0x26: 0, 0x27: 0, 0x28: 0, 0x29: 0, 0x2a: 0, 0x2b: 0,
                  0x2c: 0, 0x2d: 0, 0x2e: 0, 0x2f: 0, 0x30: 0}
 
+# per JTolmar
+BRANCHING_CODES = [[0x06],
+                   [0x09],
+                   [0x1B,0x02],
+                   [0x1B,0x03],
+                   [0x1F,0xC0]]
+
 PATTERNS = [r"\[(06 \w\w \w\w )(\w\w \w\w \w\w \w\w)]",
             r"\[(08 )(\w\w \w\w \w\w \w\w)]",
             r"\[(09 \w\w)(( \w\w \w\w \w\w \w\w)+)\]",
@@ -150,7 +157,7 @@ def ToSNES(hexNum):
 
 class CCScriptWriter:
 
-    def __init__(self, romFile, outputDirectory, raw=False):
+    def __init__(self, romFile, outputDirectory, raw=False, splitjumps=False):
 
         # Declare our variables.
         self.asmPointers = {}
@@ -160,6 +167,7 @@ class CCScriptWriter:
         self.outputDirectory = outputDirectory
         self.pointers = []
         self.raw = raw
+        self.splitjumps = splitjumps
         self.specialPointers = {}
 
         # Get the data from the ROM file.
@@ -462,6 +470,7 @@ class CCScriptWriter:
             if stop and stop == i:
                 break
             c = self.data[i]
+            initialI = i
             i += 1
             # Is it a normal block?
             if dataType == 0:
@@ -491,6 +500,18 @@ class CCScriptWriter:
                         normal_block_expect_02 = False
                     elif c == 0x02 or c == 0x0A:
                         break
+                    elif self.splitjumps:
+                        whilebreak = False
+                        for codesequence in BRANCHING_CODES:
+                            if c == codesequence[0]:
+                                if (len(codesequence) == 1):
+                                    whilebreak = True
+                                    break
+                                elif (self.data[initialI+1] == codesequence[1]):#presumes max sequence length of 2
+                                    whilebreak = True
+                                    break
+                        if whilebreak:
+                            break
                 # Check if it's a special character.
                 elif c == 0x52 or c == 0x8b or c == 0x8c or c == 0x8d:
                     block += "[{}]".format(FormatHex(c))
@@ -731,6 +752,9 @@ def main():
         parser.add_argument("-r", "--raw", help="specifies that the control "
                             "codes should be outputted raw, without CCScript "
                             "replacements", action="store_true")
+        parser.add_argument("-s", "--splitjumps", help="starts a new block whenever "
+                            "a (potential) jump is encountered, so that the end of "
+                            "any started block is guaranteed to be reached", action="store_true")
         args = parser.parse_args()
 
         # Run the program.
@@ -738,7 +762,7 @@ def main():
             output = os.path.join(args.output, "ccscript")
         else:
             output = args.output
-        main = CCScriptWriter(args.rom, output, args.raw)
+        main = CCScriptWriter(args.rom, output, args.raw, args.splitjumps)
         main.loadDialogue(args.coilsnake)
         main.processDialogue()
         main.outputDialogue(args.coilsnake)
