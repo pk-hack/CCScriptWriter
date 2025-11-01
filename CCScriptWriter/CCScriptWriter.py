@@ -167,7 +167,7 @@ def test_ToSNES():
 
 # essentially, the problem is that the args are in different formats and counts
 # so they're basically impossible to match with something like a normal regular expression
-# 
+#
 # we don't want to build an AST yet, if we can avoid it. So... We'll have to just
 # break things down. Painfully.
 #
@@ -214,7 +214,7 @@ def grey_replace(ccScriptCommand, before, after, maxdist, block, replaceFunc):
                 # we've found a start and an end, now to just figure out the
                 # middle and replace it
                 found = True
-                
+
                 # we can only replace if it's less than the max distance
                 if (dist <= maxdist):
                     # the segment we'll replace
@@ -238,7 +238,7 @@ def grey_replace(ccScriptCommand, before, after, maxdist, block, replaceFunc):
 def grey_replaceByteArgs(byteArgs, ccScriptCommand):
     # eventually
     ret = "{" + ccScriptCommand + "("
-    
+
     # split
     bArgs = byteArgs.split()
 
@@ -247,7 +247,7 @@ def grey_replaceByteArgs(byteArgs, ccScriptCommand):
         # first is different
         if (i > 0):
             ret = ret + ", "
-        
+
         # convert to int, then to string, then staple to ret
         ret = ret + str(int(bArgs[i], 16))
 
@@ -266,7 +266,7 @@ def grey_replace_all(block):
     # ---------
     # byte args
     # ---------
-    
+
     # text control
     ret = grey_replace("itemname",     "[1C 05 ", "]", 5, ret, grey_replaceByteArgs)
     ret = grey_replace("name",         "[1C 02 ", "]", 2, ret, grey_replaceByteArgs)
@@ -298,7 +298,7 @@ def grey_replace_all(block):
     ret = grey_replace("hurt_percent",      "[1E 01 ", "]", 5, ret, grey_replaceByteArgs)
     ret = grey_replace("recoverpp",         "[1E 06 ", "]", 5, ret, grey_replaceByteArgs)
     ret = grey_replace("recoverpp_percent", "[1E 04 ", "]", 5, ret, grey_replaceByteArgs)
-    
+
     # sound and music
     ret = grey_replace("music",        "[1F 00 00 ", "]", 2, ret, grey_replaceByteArgs)
     ret = grey_replace("music_effect", "[1F 07 ",    "]", 2, ret, grey_replaceByteArgs)
@@ -519,7 +519,7 @@ class CCScriptWriter:
                 for r in RE_REPLACE:
                     b = re.sub(r, self.replaceWithCCScript, b)
                 b = grey_replace_all(b)
-                
+
             self.dialogue[block][0] = b
 
     # Outputs the processed dialogue to the specified output directory.
