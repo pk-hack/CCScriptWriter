@@ -1,6 +1,8 @@
 #!/usr/bin/env python
-# CCScriptWriter
-# Extracts the dialogue from EarthBound and outputs it into a CCScript file.
+'''
+CCScriptWriter
+Extracts the dialogue from EarthBound and outputs it into a CCScript file.
+'''
 
 import argparse
 import array
@@ -103,38 +105,43 @@ SPECIAL_POINTERS = [0x49ea4, 0x49ea8, 0x49eac, 0x49eb0, 0x49eb4, 0x49eb8,
 
 ASM_POINTERS = [0x49dbd, 0x49dc9, 0x4f252]
 
-HEADER = """/*
+HEADER = f"""/*
  * EarthBound Text Dump
- * Time: {}
+ * Time: {time.strftime("%H:%M:%S - %d/%m/%Y")}
  * Generated using CCScriptWriter.
  */
 
-""".format(time.strftime("%H:%M:%S - %d/%m/%Y"))
+"""
 
 
 #####################
 # UTILITY FUNCTIONS #
 #####################
 
-# Find the closest and lowest key.
 def FindClosest(dictionary, searchKey):
-
-    lower = 0
+    "Find the closest and lowest key."
+    lower = None
     for key in sorted(dictionary):
-        if searchKey - key >= 0:
+        if searchKey >= key:
             lower = key
         else:
-            higher = key
-    return lower, higher
+            break
+    return lower
 
-# Format a hex number to a control code format.
+def test_FindClosest():
+    assert FindClosest([10,20,30], 9) is None
+    assert FindClosest([10,20,30], 15) == 10
+    assert FindClosest([10,20,30], 19) == 10
+    assert FindClosest([10,20,30], 20) == 20
+    assert FindClosest([10,20,30], 21) == 20
+    assert FindClosest([10,20,30], 10000) == 30
+
 def FormatHex(intNum):
-
+    "Format a hex number to a control code format."
     return '{:02X}'.format(intNum)
 
-# Converts an SNES address to a hexadecimal address.
 def FromSNES(snesNum):
-
+    "Converts an SNES address to a hexadecimal address."
     return int("".join(reversed(snesNum.strip().split())), 16)
 
 def test_FromSNES():
@@ -146,9 +153,8 @@ def test_FromSNES():
     assert 0xcafe_f00d == FromSNES('0D F0 FE CA')
     assert 0xcafe_f00d == FromSNES('0d f0 fe ca')
 
-# Converts a hexadecimal address to an SNES address.
 def ToSNES(hexNum):
-
+    "Converts a hexadecimal address to an SNES address."
     if hexNum == 0:
         return "00 00 00 00"
     return " ".join(reversed(re.findall(r"\w\w", "{:08X}".format(hexNum))))
@@ -167,6 +173,7 @@ def test_ToSNES():
 
 # essentially, the problem is that the args are in different formats and counts
 # so they're basically impossible to match with something like a normal regular expression
+# [charasyn 2025: I was able to match each using its own regex]
 #
 # we don't want to build an AST yet, if we can avoid it. So... We'll have to just
 # break things down. Painfully.
@@ -179,62 +186,6 @@ def test_ToSNES():
 #
 # ~greysondn@github, 22 August 2021
 
-def grey_replace(ccScriptCommand, before, after, maxdist, block, replaceFunc):
-    # this is actually the outer wrapper
-    # ccscriptcommand - given to replaceFunc
-    # before - text before
-    # after - text after
-    # maximum distance after `before` that `after` can be.
-    # block - the source block to replace in
-    # replaceFunc - function used to generate replacement text, f(ccArgsText, ccScriptCommand)
-    ret  = block            # maybe not necessary, but helps track the eventual return
-    blen = len(before)      # shorter name, no function call for val
-    alen = len(after)       # same
-
-    # seed var for loop context
-    found       = True
-    minlocation = 0
-
-    # we're going to find all instances
-    while found:
-        # we've not found this during this iteration
-        found = False
-
-        # try to find start
-        location = ret[minlocation:].find(before)
-
-        if (-1 != location):
-            # means we found start
-            # try to find end
-            location = location + minlocation
-            minlocation = location + 1
-            dist = ret[(location + blen):].find(after)
-
-            if (-1 != dist):
-                # we've found a start and an end, now to just figure out the
-                # middle and replace it
-                found = True
-
-                # we can only replace if it's less than the max distance
-                if (dist <= maxdist):
-                    # the segment we'll replace
-                    toReplace = ret[location:(location+blen+alen+dist)]
-
-                    # just the part with args
-                    # and just in case user is awful, strip whitespace from it
-                    argContent = toReplace[blen:blen+dist].strip()
-
-                    # use replaceFunc to generate the replacement text
-                    replaceWith = replaceFunc(argContent, ccScriptCommand)
-
-                    # actually replace it
-                    # it might be safe to remove the count limit
-                    ret = ret.replace(toReplace, replaceWith, 1)
-
-    # didn't find any/any more
-    # return whatever we wound up with
-    return ret
-
 def grey_replaceByteArgs(byteArgs, ccScriptCommand):
     # eventually
     ret = "{" + ccScriptCommand + "("
@@ -245,7 +196,7 @@ def grey_replaceByteArgs(byteArgs, ccScriptCommand):
     # convert to int..?
     for i in range(len(bArgs)):
         # first is different
-        if (i > 0):
+        if i > 0:
             ret = ret + ", "
 
         # convert to int, then to string, then staple to ret
@@ -257,7 +208,69 @@ def grey_replaceByteArgs(byteArgs, ccScriptCommand):
     # done
     return ret
 
-def grey_replace_all(block):
+GREY_BYTE_REPLACEMENTS = {
+    # text control
+    "itemname":          re.compile(r"\[1C 05 (.. ..)\]"),
+    "name":              re.compile(r"\[1C 02 (..)\]"),
+    "psiname":           re.compile(r"\[1C 12 (..)\]"),
+    "stat":              re.compile(r"\[1C 01 (..)\]"),
+    "teleportname":      re.compile(r"\[1C 06 (..)\]"),
+    "text_blips":        re.compile(r"\[1F 04 (..)\]"),
+    "text_color":        re.compile(r"\[1C 00 (..)\]"),
+    "text_pos":          re.compile(r"\[18 05 (.. ..)\]"),
+
+    # goods and money
+    "give":              re.compile(r"\[1D 00 (.. ..)\]"),
+    "hasitem":           re.compile(r"\[1D 05 (.. ..)\]"),
+    "take":              re.compile(r"\[1D 01 (.. ..)\]"),
+    "usable":            re.compile(r"\[1F 81 (.. ..)\]"),
+
+    # stats
+    "boost_guts":        re.compile(r"\[1E 0B (.. ..)\]"),
+    "boost_iq":          re.compile(r"\[1E 0A (.. ..)\]"),
+    "boost_luck":        re.compile(r"\[1E 0E (.. ..)\]"),
+    "boost_speed":       re.compile(r"\[1E 0C (.. ..)\]"),
+    "boost_vitality":    re.compile(r"\[1E 0D (.. ..)\]"),
+    "change_level":      re.compile(r"\[1E 08 (.. ..)\]"),
+    "consumepp":         re.compile(r"\[1E 07 (.. ..)\]"),
+    "consumepp_percent": re.compile(r"\[1E 05 (.. ..)\]"),
+    "heal":              re.compile(r"\[1E 02 (.. ..)\]"),
+    "heal_percent":      re.compile(r"\[1E 00 (.. ..)\]"),
+    "hurt":              re.compile(r"\[1E 03 (.. ..)\]"),
+    "hurt_percent":      re.compile(r"\[1E 01 (.. ..)\]"),
+    "recoverpp":         re.compile(r"\[1E 06 (.. ..)\]"),
+    "recoverpp_percent": re.compile(r"\[1E 04 (.. ..)\]"),
+
+    # sound and music
+    "music":             re.compile(r"\[1F 00 00 (..)\]"),
+    "music_effect":      re.compile(r"\[1F 07 (..)\]"),
+    "sound":             re.compile(r"\[1F 02 (..)\]"),
+
+    # gameplay control
+    "event":             re.compile(r"\[1F 41 (..)\]"),
+    "hotspot_off":       re.compile(r"\[1F 67 (..)\]"),
+    "learnpsi":          re.compile(r"\[1F 71 (.. ..)\]"),
+    "lock_movement":     re.compile(r"\[1F E5 (..)\]"),
+    "party_add":         re.compile(r"\[1F 11 (..)\]"),
+    "party_remove":      re.compile(r"\[1F 12 (..)\]"),
+    "teleport":          re.compile(r"\[1F 20 (.. ..)\]"),
+    "warp":              re.compile(r"\[1F 21 (..)\]"),
+
+    # visual effects
+    "show_party":        re.compile(r"\[1F EC FF (..)\]"),
+    "char_direction":    re.compile(r"\[1F 13 (.. ..)\]"),
+    "show_char":         re.compile(r"\[1F EC (.. ..)\]"),
+    "hide_char":         re.compile(r"\[1F EB (..) 06\]"),
+    "hide_char_float":   re.compile(r"\[1F 1D (..)\]"),
+}
+
+def grey_replace_regex(block: str, ccScriptCommand: str, regex: re.Pattern, replaceFunc)\
+        -> str:
+    def _regexCallback(m: re.Match) -> str:
+        return replaceFunc(m.group(1), ccScriptCommand)
+    return re.sub(regex, _regexCallback, block)
+
+def grey_replace_all(block: str) -> str:
     # ------------
     # setup return
     # ------------
@@ -267,65 +280,16 @@ def grey_replace_all(block):
     # byte args
     # ---------
 
-    # text control
-    ret = grey_replace("itemname",     "[1C 05 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("name",         "[1C 02 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("psiname",      "[1C 12 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("stat",         "[1C 01 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("teleportname", "[1C 06 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("text_blips",   "[1F 04 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("text_color",   "[1C 00 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("text_pos",     "[18 05 ", "]", 5, ret, grey_replaceByteArgs)
-
-    # goods and money
-    ret = grey_replace("give",    "[1D 00 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("hasitem", "[1D 05 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("take",    "[1D 01 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("usable",  "[1F 81 ", "]", 5, ret, grey_replaceByteArgs)
-
-    # stats
-    ret = grey_replace("boost_guts",        "[1E 0B ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("boost_iq",          "[1E 0A ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("boost_luck",        "[1E 0E ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("boost_speed",       "[1E 0C ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("boost_vitality",    "[1E 0D ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("change_level",      "[1E 08 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("consumepp",         "[1E 07 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("consumepp_percent", "[1E 05 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("heal",              "[1E 02 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("heal_percent",      "[1E 00 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("hurt",              "[1E 03 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("hurt_percent",      "[1E 01 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("recoverpp",         "[1E 06 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("recoverpp_percent", "[1E 04 ", "]", 5, ret, grey_replaceByteArgs)
-
-    # sound and music
-    ret = grey_replace("music",        "[1F 00 00 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("music_effect", "[1F 07 ",    "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("sound",        "[1F 02 ",    "]", 2, ret, grey_replaceByteArgs)
-
-    # gameplay control
-    ret = grey_replace("event",         "[1F 41 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("hotspot_off",   "[1F 67 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("learnpsi",      "[1F 71 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("lock_movement", "[1F E5 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("party_add",     "[1F 11 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("party_remove",  "[1F 12 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("teleport",      "[1F 20 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("warp",          "[1F 21 ", "]", 2, ret, grey_replaceByteArgs)
-
-    # visual effects
-    ret = grey_replace("show_party", "[1F EC FF ", "]", 2, ret, grey_replaceByteArgs)
-
-    ret = grey_replace("char_direction",  "[1F 13 ", "]",    5, ret, grey_replaceByteArgs)
-    ret = grey_replace("show_char",       "[1F EC ", "]",    5, ret, grey_replaceByteArgs)
-    ret = grey_replace("hide_char",       "[1F EB ", " 06]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("hide_char_float", "[1F 1D ", "]",    2, ret, grey_replaceByteArgs)
+    for ccScriptCommand, regex in GREY_BYTE_REPLACEMENTS.items():
+        ret = grey_replace_regex(ret, ccScriptCommand, regex, grey_replaceByteArgs)
 
     # --------
     # end func
     # --------
     return ret
+
+def test_grey_replace_all():
+    assert grey_replace_all('[1F 02 01]') == '{sound(1)}'
 
 ##################
 # CCScriptWriter #
@@ -447,10 +411,8 @@ class CCScriptWriter:
             if address in pointers:
                 pointers.remove(address)
         for pointer in pointers:
-            try:
-                lower, higher = FindClosest(self.dialogue, pointer)
-            except UnboundLocalError:
-                continue
+            lower = FindClosest(self.dialogue, pointer)
+            assert lower is not None, f"Unable to find closest block for pointer {pointer:#06x}"
             block, i = self.getText(lower - 0xc00000, pointer - 0xc00000)
             self.dialogue[lower] = ["{}[0A {}]".format(block[0],
                                                        ToSNES(pointer)),
@@ -628,7 +590,7 @@ class CCScriptWriter:
             csFile = open(os.path.join(o, fileName), "w")
             output = yaml.dump(yamlData, default_flow_style=False,
                       Dumper=yaml.CSafeDumper)
-            output = re.sub("Event Flag: (\d+)",
+            output = re.sub(r"Event Flag: (\d+)",
                    lambda i: "Event Flag: " + hex(int(i.group(0)[12:])), output)
             csFile.write(output)
             csFile.close()
