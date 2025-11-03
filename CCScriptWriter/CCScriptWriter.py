@@ -4,6 +4,7 @@
 
 import argparse
 import array
+from importlib.metadata import version
 import math
 import os
 import re
@@ -18,7 +19,7 @@ from functools import reduce
 # CONSTANTS #
 #############
 
-VERSION = 'v1.3'
+VERSION = f"v{version('CCScriptWriter')}"
 
 D = [0x45, 0x41, 0x52, 0x54, 0x48, 0x20, 0x42, 0x4f, 0x55, 0x4E, 0x44]
 
