@@ -80,7 +80,7 @@ REPLACE = [["[13][02]\"", "\" end"], ["[03][00]", "\" next\n\""],
            ["[1F 30]", "{font_normal}"], ["[1F 31]", "{font_saturn}"],
            [" \"\"", ""], [" \"\" ", " "], [" \"\"", ""], ["\"\" ", ""]]
 RE_REPLACE = [r"\[(0[4|5|7])( \w\w \w\w)\]",
-              r"\[(10|18 01|18 03|0E|0B|0C])( \w\w)\]",
+              r"\[(10|18 01|18 03|0E|0B|0C)( \w\w)\]",
               r"\[(1F 02|1F 00 00|1F 07])( \w\w)\]"]
 
 COILSNAKE_FILES = ["attract_mode_txt.yml", "battle_action_table.yml",
