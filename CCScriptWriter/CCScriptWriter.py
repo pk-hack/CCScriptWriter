@@ -6,6 +6,8 @@ Extracts the dialogue from EarthBound and outputs it into a CCScript file.
 
 import argparse
 import array
+from enum import Enum
+from functools import reduce
 from importlib.metadata import version
 import math
 import os
@@ -14,8 +16,15 @@ import sys
 import time
 
 import yaml
-from functools import reduce
 
+##############
+# DATA TYPES #
+##############
+
+class TextType(Enum):
+    Normal = 1
+    Coffee = 2
+    Staff = 3
 
 #############
 # CONSTANTS #
@@ -302,55 +311,18 @@ class CCScriptWriter:
         print("Loading dialogue...")
         for section in TEXT_DATA:
             i = section[0]
-            dataType = 0
-            if section[0] == 0x210000 or section[0] == 0x210652 \
-              or section[0] == 0x210b86:
-                dataType = 1
+            dataType = TextType.Normal
+            if section[0] in {0x210000, 0x210652, 0x210b86}:
+                dataType = TextType.Coffee
             elif section[0] == 0x21413f:
-                dataType = 2
+                dataType = TextType.Staff
             while i < section[1]:
                 block = i + 0xc00000
                 self.dialogue[block], i = self.getText(i, None, dataType)
 
         # Optionally load the CoilSnake pointers.
         if loadCoilSnake:
-            o = os.path.join(self.outputDirectory, os.path.pardir)
-            project = os.path.join(o, "Project.snake")
-            try:
-                with open(project) as f: pass
-            except IOError:
-                print("Failed to open \"{}\". Invalid CoilSnake project. "
-                      "Aborting.".format(project))
-                sys.exit(1)
-            for fileName in COILSNAKE_FILES:
-                csFile = open(os.path.join(o, fileName), "r")
-                yamlData = yaml.load(csFile, Loader=yaml.CSafeLoader)
-                csFile.close()
-                if fileName != "map_doors.yml":
-                    for e, v in yamlData.items():
-                        for p in COILSNAKE_POINTERS:
-                            if p in v:
-                                try:
-                                    pointer = int(v[p][1:], 16)
-                                    if pointer > 0xc00000 \
-                                       and pointer not in self.dialogue:
-                                        self.pointers.append(pointer)
-                                except ValueError:
-                                    self.pointers.append(int(v[p][12:], 16))
-                else:
-                    p = "Text Pointer"
-                    for e, v in yamlData.items():
-                        for s, d in v.items():
-                            if not d: continue
-                            for k in d:
-                                if p in k:
-                                    try:
-                                        pointer = int(k[p][1:], 16)
-                                        if pointer > 0xc00000 \
-                                           and pointer not in self.dialogue:
-                                            self.pointers.append(pointer)
-                                    except ValueError:
-                                        self.pointers.append(int(k[p][12:], 16))
+            self.loadCoilSnakeDialogue()
 
         # Find the special pointed-to locations.
         for p in SPECIAL_POINTERS:
@@ -413,12 +385,54 @@ class CCScriptWriter:
             h = hex(address)
             self.asmPointers[a] = ["{}.l_{}".format(m, h), t]
 
+    def loadCoilSnakeDialogue(self):
+        "Load pointers from the CoilSnake project."
+        o = os.path.join(self.outputDirectory, os.path.pardir)
+        project = os.path.join(o, "Project.snake")
+        try:
+            with open(project, "r", encoding="utf8"):
+                pass
+        except IOError:
+            print("Failed to open \"{}\". Invalid CoilSnake project. "
+                    "Aborting.".format(project))
+            sys.exit(1)
+        # pylint: disable=too-many-nested-blocks
+        for fileName in COILSNAKE_FILES:
+            with open(os.path.join(o, fileName), "r", encoding="utf8") as csFile:
+                yamlData = yaml.load(csFile, Loader=yaml.CSafeLoader)
+            if fileName != "map_doors.yml":
+                for v in yamlData.values():
+                    for p in COILSNAKE_POINTERS:
+                        if p in v:
+                            try:
+                                pointer = int(v[p][1:], 16)
+                                if pointer > 0xc00000 \
+                                    and pointer not in self.dialogue:
+                                    self.pointers.append(pointer)
+                            except ValueError:
+                                self.pointers.append(int(v[p][12:], 16))
+            else:
+                p = "Text Pointer"
+                for v in yamlData.values():
+                    for d in v.values():
+                        if not d:
+                            continue
+                        for k in d:
+                            if p in k:
+                                try:
+                                    pointer = int(k[p][1:], 16)
+                                    if pointer > 0xc00000 \
+                                        and pointer not in self.dialogue:
+                                        self.pointers.append(pointer)
+                                except ValueError:
+                                    self.pointers.append(int(k[p][12:], 16))
+
     # Performs various replacements on the dialogue blocks.
     def processDialogue(self):
 
         print("Processing dialogue...")
         f = self.replaceWithLabel
-        for block in self.dialogue:
+        for block in self.dialogue: # pylint: disable=consider-using-dict-items
             b = self.dialogue[block][0]
             b = "\"{}\"".format(b)
 
@@ -453,50 +467,48 @@ class CCScriptWriter:
         o = self.outputDirectory
 
         # Prepare the main file containing ROM addresses.
-        mainFile = open(os.path.join(o, "main.ccs"), "w")
-        m = mainFile.write
-        m(HEADER)
-        m("// DO NOT EDIT THIS FILE.\n")
-        m("\ncommand e(label) \"{long label}\"")
-        m("\ncommand _lasmptr(loc,target) {\n    ROMTBL[loc, 1, 1] = short [0] "
-          "target\n    ROMTBL[loc, 7, 1] = short [1] target\n}")
+        with open(os.path.join(o, "main.ccs"), "w", encoding="utf8") as mainFile:
+            m = mainFile.write
+            m(HEADER)
+            m("// DO NOT EDIT THIS FILE.\n")
+            m("\ncommand e(label) \"{long label}\"")
+            m("\ncommand _lasmptr(loc,target) {\n    ROMTBL[loc, 1, 1] = short [0] "
+            "target\n    ROMTBL[loc, 7, 1] = short [1] target\n}")
 
-        # Output each data_xx.ccs file.
-        numFiles = math.ceil(len(self.dialogue) / 100)
-        i = 0
-        while i <= numFiles:
-            f = "data_{0:0>2}.".format(i)
-            fileName = "{}ccs".format(f)
-            dataFile = open(os.path.join(o, fileName), "w")
-            d = dataFile.write
-            d(HEADER)
-            d("command e(label) \"{long label}\"\n")
-            d("\n// Text Data\n")
-            dialogue = sorted(self.dialogue)[i * 100:i * 100 + 100]
-            m("\n\n// Memory Overwriting: {}".format(fileName))
-            for block in dialogue:
-                d("l_{}:\n".format(hex(block)))
-                lines = self.dialogue[block][0].split("\n")
-                for line in lines:
-                    l = line.replace(f, "")
-                    d("    {}\n".format(l))
-                d("\n")
-                if self.dialogue[block][1] >= 5:
-                    m("\nROM[{}] = goto({}l_{})".format(hex(block), f,
-                                                        hex(block)))
-            dataFile.close()
-            i += 1
+            # Output each data_xx.ccs file.
+            numFiles = math.ceil(len(self.dialogue) / 100)
+            i = 0
+            while i <= numFiles:
+                f = f"data_{i:02}."
+                fileName = f"{f}ccs"
+                with open(os.path.join(o, fileName), "w", encoding="utf8") as dataFile:
+                    d = dataFile.write
+                    d(HEADER)
+                    d("command e(label) \"{long label}\"\n")
+                    d("\n// Text Data\n")
+                    dialogue = sorted(self.dialogue)[i * 100:i * 100 + 100]
+                    m("\n\n// Memory Overwriting: {}".format(fileName))
+                    for block in dialogue:
+                        d("l_{}:\n".format(hex(block)))
+                        lines = self.dialogue[block][0].split("\n")
+                        for line in lines:
+                            l = line.replace(f, "")
+                            d("    {}\n".format(l))
+                        d("\n")
+                        if self.dialogue[block][1] >= 5:
+                            m("\nROM[{}] = goto({}l_{})".format(hex(block), f,
+                                                                hex(block)))
+                i += 1
 
-        # Take care of the special pointers (both SNES and ASM type).
-        m("\n\n// Special Pointers")
-        for k, p in self.specialPointers.items():
-            m("\nROM[{}] = \"{}\"".format(hex(k + 0xc00000), p))
-        for k, p in self.asmPointers.items():
-            if p[1] == 0:
-                m("\n_asmptr({}, {})".format(hex(k + 0xc00000), p[0]))
-            elif p[1] == 1:
-                m("\n_lasmptr({}, {})".format(hex(k + 0xc00000), p[0]))
-        mainFile.close()
+            # Take care of the special pointers (both SNES and ASM type).
+            m("\n\n// Special Pointers")
+            for k, p in self.specialPointers.items():
+                m("\nROM[{}] = \"{}\"".format(hex(k + 0xc00000), p))
+            for k, p in self.asmPointers.items():
+                if p[1] == 0:
+                    m("\n_asmptr({}, {})".format(hex(k + 0xc00000), p[0]))
+                elif p[1] == 1:
+                    m("\n_lasmptr({}, {})".format(hex(k + 0xc00000), p[0]))
 
         # Optionally output to the CoilSnake project.
         if outputCoilSnake:
@@ -507,9 +519,10 @@ class CCScriptWriter:
 
         print("Modifying CoilSnake project...")
         o = os.path.join(self.outputDirectory, os.path.pardir)
+        # pylint: disable=too-many-nested-blocks
         for fileName in COILSNAKE_FILES:
-            csFile = open(os.path.join(o, fileName), "r")
-            yamlData = yaml.load(csFile, Loader=yaml.CSafeLoader)
+            with open(os.path.join(o, fileName), "r", encoding="utf8") as csFile:
+                yamlData = yaml.load(csFile, Loader=yaml.CSafeLoader)
             if fileName != "map_doors.yml":
                 for e, v in yamlData.items():
                     pointers = {}
@@ -530,7 +543,8 @@ class CCScriptWriter:
                 p = "Text Pointer"
                 for e, v in yamlData.items():
                     for s, d in v.items():
-                        if not d: continue
+                        if not d:
+                            continue
                         for n, k in enumerate(d):
                             pointers = {}
                             if p in k:
@@ -546,27 +560,26 @@ class CCScriptWriter:
                                 f = self.dataFiles[b]
                                 yamlData[e][s][n][a] = "{}.l_{}".format(f,
                                                                         hex(b))
-            csFile = open(os.path.join(o, fileName), "w")
             output = yaml.dump(yamlData, default_flow_style=False,
-                      Dumper=yaml.CSafeDumper)
+                    Dumper=yaml.CSafeDumper)
             output = re.sub(r"Event Flag: (\d+)",
-                   lambda i: "Event Flag: " + hex(int(i.group(0)[12:])), output)
-            csFile.write(output)
-            csFile.close()
+                lambda i: "Event Flag: " + hex(int(i.group(0)[12:])), output)
+            with open(os.path.join(o, fileName), "w", encoding="utf8") as csFile:
+                csFile.write(output)
 
     # Gets the text at a specified location in memory; if stop is specified, it
     # will forcibly stop looking once it is reached. The third parameter
     # specifies whether the data block is a normal block, a coffee scene type
     # block or a staff list block.
-    def getText(self, i, stop=None, dataType=0):
+    def getText(self, i, stop=None, dataType=TextType.Normal):
 
         start = i
         stop = stop or 0xFFFF_FFFF
 
         textFns = {
-            0: self.getTextNormal,
-            1: self.getTextCoffee,
-            2: self.getTextStaff,
+            TextType.Normal: self.getTextNormal,
+            TextType.Coffee: self.getTextCoffee,
+            TextType.Staff: self.getTextStaff,
         }
         fn = textFns.get(dataType)
         assert fn, f"Invalid text type {dataType}"
@@ -712,6 +725,7 @@ class CCScriptWriter:
     def getLength(self, i):
 
         c = self.data[i - 1]
+        combos = {}
         if c == 0x09:
             return 1 + self.data[i] * 4
         elif c == 0x1B:
@@ -765,10 +779,7 @@ class CCScriptWriter:
                       0x0C: 3, 0x0D: 4, 0x0E: 3, 0x0F: 3, 0x10: 3, 0x11: 3,
                       0x12: 3, 0x13: 3, 0x14: 5, 0x15: 3, 0x17: 5, 0x18: 2,
                       0x19: 2, 0x20: 1, 0x21: 2, 0x22: 1, 0x23: 2, 0x24: 2}
-        try:
-            return combos[self.data[i]]
-        except:
-            return 0
+        return combos.get(self.data[i], 0)
 
     # Replaces the compressed text control codes with their values.
     def replaceCompressedText(self, matchObj):
@@ -866,10 +877,10 @@ def main():
             output = os.path.join(args.output, "ccscript")
         else:
             output = args.output
-        main = CCScriptWriter(args.rom, output, args.raw, args.splitjumps)
-        main.loadDialogue(args.coilsnake)
-        main.processDialogue()
-        main.outputDialogue(args.coilsnake)
+        writer = CCScriptWriter(args.rom, output, args.raw, args.splitjumps)
+        writer.loadDialogue(args.coilsnake)
+        writer.processDialogue()
+        writer.outputDialogue(args.coilsnake)
         print("Complete. Time: {:.2f}s".format(float(time.time() - start)))
     except KeyboardInterrupt:
         print("\rProgram execution aborted.")
