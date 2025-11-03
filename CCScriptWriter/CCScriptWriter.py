@@ -84,22 +84,76 @@ REPLACE = [["[13][02]\"", "\" end"], ["[03][00]", "\" next\n\""],
            ["[1F 06]", "{music_switching_on}"], ["[1F B0]", "{save}"],
            ["[1F 30]", "{font_normal}"], ["[1F 31]", "{font_saturn}"],
            [" \"\"", ""], [" \"\" ", " "], [" \"\"", ""], ["\"\" ", ""]]
-RE_REPLACE = [r"\[(0[4|5|7])( \w\w \w\w)\]",
-              r"\[(10|18 01|18 03|0E|0B|0C)( \w\w)\]",
-              r"\[(1F 02|1F 00 00|1F 07])( \w\w)\]"]
+RE_REPLACE = [
+    # flag parameter
+    re.compile(r"\[(0[4|5|7]) (\w\w \w\w)\]"),
+    # one parameter
+    re.compile(r"\[(0[BCE]|10|18 0[13]|1C 0[01256]|1C 12|"
+                  r"1F (?:00 00|0[247]|1[12D]|21|41|67|E5|EC FF)) (\w\w)\]"),
+    # 1F EB xx 06
+    re.compile(r"\[(1F EB) (\w\w) 06\]"),
+    # two parameters
+    re.compile(r"\[(18 05|1D 0[015]|1E 0[0-8A-E]|1F (?:13|20|71|81|EC)) (\w\w) (\w\w)\]"),
+]
 RE_REPLACE_TARGETS = {
+    # flag
     "04":       "{{set(flag {})}}",
     "05":       "{{unset(flag {})}}",
     "07":       "{{isset(flag {})}}",
+
+    # one parameter
+    "0B":       "{{result_is({})}}",
+    "0C":       "{{result_not({})}}",
+    "0E":       "{{counter({})}}",
     "10":       "{{pause({})}}",
     "18 01":    "{{window_open({})}}",
     "18 03":    "{{window_switch({})}}",
-    "0E":       "{{counter({})}}",
-    "0B":       "{{result_is({})}}",
-    "0C":       "{{result_not({})}}",
-    "1F 02":    "{{sound({})}}",
+    "1C 00":    "{{text_color({})}}",
+    "1C 01":    "{{stat({})}}",
+    "1C 02":    "{{name({})}}",
+    "1C 05":    "{{itemname({})}}",
+    "1C 06":    "{{teleportname({})}}",
+    "1C 12":    "{{psiname({})}}",
     "1F 00 00": "{{music({})}}",
+    "1F 02":    "{{sound({})}}",
+    "1F 04":    "{{text_blips({})}}",
     "1F 07":    "{{music_effect({})}}",
+    "1F 11":    "{{party_add({})}}",
+    "1F 12":    "{{party_remove({})}}",
+    "1F 1D":    "{{hide_char_float({})}}",
+    "1F 21":    "{{warp({})}}",
+    "1F 41":    "{{event({})}}",
+    "1F 67":    "{{hotspot_off({})}}",
+    "1F E5":    "{{lock_movement({})}}",
+    "1F EC FF": "{{show_party({})}}",
+
+    # 1F EB xx 06
+    "1F EB": "{{hide_char({})}}",
+
+    # two-argument
+    "18 05": "{{text_pos({}, {})}}",
+    "1D 00": "{{give({}, {})}}",
+    "1D 01": "{{take({}, {})}}",
+    "1D 05": "{{hasitem({}, {})}}",
+    "1E 00": "{{heal_percent({}, {})}}",
+    "1E 01": "{{hurt_percent({}, {})}}",
+    "1E 02": "{{heal({}, {})}}",
+    "1E 03": "{{hurt({}, {})}}",
+    "1E 04": "{{recoverpp_percent({}, {})}}",
+    "1E 05": "{{consumepp_percent({}, {})}}",
+    "1E 06": "{{recoverpp({}, {})}}",
+    "1E 07": "{{consumepp({}, {})}}",
+    "1E 08": "{{change_level({}, {})}}",
+    "1E 0A": "{{boost_iq({}, {})}}",
+    "1E 0B": "{{boost_guts({}, {})}}",
+    "1E 0C": "{{boost_speed({}, {})}}",
+    "1E 0D": "{{boost_vitality({}, {})}}",
+    "1E 0E": "{{boost_luck({}, {})}}",
+    "1F 13": "{{char_direction({}, {})}}",
+    "1F 20": "{{teleport({}, {})}}",
+    "1F EC": "{{show_char({}, {})}}",
+    "1F 71": "{{learnpsi({}, {})}}",
+    "1F 81": "{{usable({}, {})}}",
 }
 
 COILSNAKE_FILES = ["attract_mode_txt.yml", "battle_action_table.yml",
@@ -180,130 +234,6 @@ def test_ToSNES():
     assert ToSNES(0x0001_0000) == '00 00 01 00'
     assert ToSNES(0x0100_0000) == '00 00 00 01'
     assert ToSNES(0xcafe_f00d) == '0D F0 FE CA'
-
-########################################
-# Arg matching + replacement functions #
-########################################
-
-# essentially, the problem is that the args are in different formats and counts
-# so they're basically impossible to match with something like a normal regular expression
-# [charasyn 2025: I was able to match each using its own regex]
-#
-# we don't want to build an AST yet, if we can avoid it. So... We'll have to just
-# break things down. Painfully.
-#
-# The complexity here wants an AST to be walked. That really is the proper way to do this.
-# Later refactors should consider just building the AST and walking it instead of asking
-# "how do we make these functions more efficient?"
-#
-# you can rename these, just aggressively avoiding name collisions
-#
-# ~greysondn@github, 22 August 2021
-
-def grey_replaceByteArgs(byteArgs, ccScriptCommand):
-    # eventually
-    ret = "{" + ccScriptCommand + "("
-
-    # split
-    bArgs = byteArgs.split()
-
-    # convert to int..?
-    for i in range(len(bArgs)):
-        # first is different
-        if i > 0:
-            ret = ret + ", "
-
-        # convert to int, then to string, then staple to ret
-        ret = ret + str(int(bArgs[i], 16))
-
-    # end paren
-    ret = ret + ")}"
-
-    # done
-    return ret
-
-GREY_BYTE_REPLACEMENTS = {
-    # text control
-    "itemname":          re.compile(r"\[1C 05 (..)\]"),
-    "name":              re.compile(r"\[1C 02 (..)\]"),
-    "psiname":           re.compile(r"\[1C 12 (..)\]"),
-    "stat":              re.compile(r"\[1C 01 (..)\]"),
-    "teleportname":      re.compile(r"\[1C 06 (..)\]"),
-    "text_blips":        re.compile(r"\[1F 04 (..)\]"),
-    "text_color":        re.compile(r"\[1C 00 (..)\]"),
-    "text_pos":          re.compile(r"\[18 05 (.. ..)\]"),
-
-    # goods and money
-    "give":              re.compile(r"\[1D 00 (.. ..)\]"),
-    "hasitem":           re.compile(r"\[1D 05 (.. ..)\]"),
-    "take":              re.compile(r"\[1D 01 (.. ..)\]"),
-    "usable":            re.compile(r"\[1F 81 (.. ..)\]"),
-
-    # stats
-    "boost_guts":        re.compile(r"\[1E 0B (.. ..)\]"),
-    "boost_iq":          re.compile(r"\[1E 0A (.. ..)\]"),
-    "boost_luck":        re.compile(r"\[1E 0E (.. ..)\]"),
-    "boost_speed":       re.compile(r"\[1E 0C (.. ..)\]"),
-    "boost_vitality":    re.compile(r"\[1E 0D (.. ..)\]"),
-    "change_level":      re.compile(r"\[1E 08 (.. ..)\]"),
-    "consumepp":         re.compile(r"\[1E 07 (.. ..)\]"),
-    "consumepp_percent": re.compile(r"\[1E 05 (.. ..)\]"),
-    "heal":              re.compile(r"\[1E 02 (.. ..)\]"),
-    "heal_percent":      re.compile(r"\[1E 00 (.. ..)\]"),
-    "hurt":              re.compile(r"\[1E 03 (.. ..)\]"),
-    "hurt_percent":      re.compile(r"\[1E 01 (.. ..)\]"),
-    "recoverpp":         re.compile(r"\[1E 06 (.. ..)\]"),
-    "recoverpp_percent": re.compile(r"\[1E 04 (.. ..)\]"),
-
-    # sound and music
-    "music":             re.compile(r"\[1F 00 00 (..)\]"),
-    "music_effect":      re.compile(r"\[1F 07 (..)\]"),
-    "sound":             re.compile(r"\[1F 02 (..)\]"),
-
-    # gameplay control
-    "event":             re.compile(r"\[1F 41 (..)\]"),
-    "hotspot_off":       re.compile(r"\[1F 67 (..)\]"),
-    "learnpsi":          re.compile(r"\[1F 71 (.. ..)\]"),
-    "lock_movement":     re.compile(r"\[1F E5 (..)\]"),
-    "party_add":         re.compile(r"\[1F 11 (..)\]"),
-    "party_remove":      re.compile(r"\[1F 12 (..)\]"),
-    "teleport":          re.compile(r"\[1F 20 (.. ..)\]"),
-    "warp":              re.compile(r"\[1F 21 (..)\]"),
-
-    # visual effects
-    "show_party":        re.compile(r"\[1F EC FF (..)\]"),
-    "char_direction":    re.compile(r"\[1F 13 (.. ..)\]"),
-    "show_char":         re.compile(r"\[1F EC (.. ..)\]"),
-    "hide_char":         re.compile(r"\[1F EB (..) 06\]"),
-    "hide_char_float":   re.compile(r"\[1F 1D (..)\]"),
-}
-
-def grey_replace_regex(block: str, ccScriptCommand: str, regex: re.Pattern, replaceFunc)\
-        -> str:
-    def _regexCallback(m: re.Match) -> str:
-        return replaceFunc(m.group(1), ccScriptCommand)
-    return re.sub(regex, _regexCallback, block)
-
-def grey_replace_all(block: str) -> str:
-    # ------------
-    # setup return
-    # ------------
-    ret = block
-
-    # ---------
-    # byte args
-    # ---------
-
-    for ccScriptCommand, regex in GREY_BYTE_REPLACEMENTS.items():
-        ret = grey_replace_regex(ret, ccScriptCommand, regex, grey_replaceByteArgs)
-
-    # --------
-    # end func
-    # --------
-    return ret
-
-def test_grey_replace_all():
-    assert grey_replace_all('[1F 02 01]') == '{sound(1)}'
 
 ##################
 # CCScriptWriter #
@@ -496,7 +426,6 @@ class CCScriptWriter:
                     b = b.replace(r[0], r[1])
                 for r in RE_REPLACE:
                     b = re.sub(r, self.replaceWithCCScript, b)
-                b = grey_replace_all(b)
 
             self.dialogue[block][0] = b
 
@@ -853,11 +782,11 @@ class CCScriptWriter:
     # Replace with CCScript syntax.
     def replaceWithCCScript(self, matchObj):
 
-        cc = matchObj.group(1)
-        value = FromSNES(matchObj.group(2))
+        cc, *valueStrs = matchObj.groups()
+        values = [FromSNES(v) for v in valueStrs]
         template = RE_REPLACE_TARGETS.get(cc)
         assert template
-        return template.format(value)
+        return template.format(*values)
 
 ########
 # MAIN #
