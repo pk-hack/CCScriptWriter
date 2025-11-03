@@ -224,7 +224,7 @@ def grey_replaceByteArgs(byteArgs, ccScriptCommand):
 
 GREY_BYTE_REPLACEMENTS = {
     # text control
-    "itemname":          re.compile(r"\[1C 05 (.. ..)\]"),
+    "itemname":          re.compile(r"\[1C 05 (..)\]"),
     "name":              re.compile(r"\[1C 02 (..)\]"),
     "psiname":           re.compile(r"\[1C 12 (..)\]"),
     "stat":              re.compile(r"\[1C 01 (..)\]"),
