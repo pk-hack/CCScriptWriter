@@ -54,11 +54,7 @@ CONTROL_CODES = {0x00: 0, 0x01: 0, 0x02: 0, 0x03: 0, 0x04: 2, 0x05: 2, 0x06: 6,
                  0x2c: 0, 0x2d: 0, 0x2e: 0, 0x2f: 0, 0x30: 0}
 
 # per JTolmar
-BRANCHING_CODES = [[0x06],
-                   [0x09],
-                   [0x1B,0x02],
-                   [0x1B,0x03],
-                   [0x1F,0xC0]]
+BRANCHING_CODES_RE = re.compile(r'\[(?:0[69]|1B 0[23]|1F C0)')
 
 PATTERNS = [r"\[(06 \w\w \w\w )(\w\w \w\w \w\w \w\w)]",
             r"\[(08 )(\w\w \w\w \w\w \w\w)]",
@@ -562,111 +558,19 @@ class CCScriptWriter:
     # will forcibly stop looking once it is reached. The third parameter
     # specifies whether the data block is a normal block, a coffee scene type
     # block or a staff list block.
-    def getText(self, i, stop=None, dataType=False):
+    def getText(self, i, stop=None, dataType=0):
 
-        block = ""
         start = i
-        text = False
-        normal_block_expect_02 = False
+        stop = stop or 0xFFFF_FFFF
 
-        while True:
-            if stop and stop == i:
-                break
-            c = self.data[i]
-            initialI = i
-            i += 1
-            # Is it a normal block?
-            if dataType == 0:
-                # Check if it's a control code.
-                if c <= 0x30:
-                    code = CONTROL_CODES[c]
-                    if isinstance(code, int):
-                        length = code
-                    else:
-                        length = self.getLength(i)
-                    block += "[{}".format(FormatHex(c))
-
-                    # Mark if we expect an [02] before the end of the block
-                    if c == 0x19 and self.data[i] == 0x02:
-                        normal_block_expect_02 = True
-
-                    # Get the rest of the control code.
-                    codeEnd = i + length
-                    while i < codeEnd:
-                        block += " {}".format(FormatHex(self.data[i]))
-                        i += 1
-                    block += "]"
-
-                    # Stop if this is a block-ending character.
-                    if c == 0x02 and normal_block_expect_02:
-                        # But don't stop if we expect an [02] that doesn't end the block
-                        normal_block_expect_02 = False
-                    elif c == 0x02 or c == 0x0A:
-                        break
-                    elif self.splitjumps:
-                        whilebreak = False
-                        for codesequence in BRANCHING_CODES:
-                            if c == codesequence[0]:
-                                if (len(codesequence) == 1):
-                                    whilebreak = True
-                                    break
-                                elif (self.data[initialI+1] == codesequence[1]):#presumes max sequence length of 2
-                                    whilebreak = True
-                                    break
-                        if whilebreak:
-                            break
-                # Check if it's a special character.
-                elif c == 0x52 or c == 0x8b or c == 0x8c or c == 0x8d:
-                    block += "[{}]".format(FormatHex(c))
-                # Looks like it's a normal character.
-                else:
-                    block += chr(c - 0x30)
-            elif dataType == 1:
-                # End of text block.
-                if c == 0x00:
-                    block += "[ 00 ]"
-                    break
-                # Move the text over a distance noted by XX.
-                elif c == 0x01:
-                    block += "[ 01 {} ]".format(FormatHex(self.data[i]))
-                    i += 1
-                # Move the text down a distance noted by XX.
-                elif c == 0x02:
-                    block += "[ 02 {} ]".format(FormatHex(self.data[i]))
-                    i += 1
-                # Print the name of character XX (01 = Ness, XX[1,4]).
-                elif c == 0x08:
-                    block += "[ 08 {} ]".format(FormatHex(self.data[i]))
-                    i += 1
-                # Drop down one line.
-                elif c == 0x09:
-                    block += "[ 09 ]"
-                # Looks like it's a normal character.
-                else:
-                    block += chr(c - 0x30)
-            elif dataType == 2:
-                if c in (0x00, 0x01, 0x02, 0x04, 0xff):
-                    if not text:
-                        block += "[ {} ]".format(FormatHex(c))
-                    else:
-                        block += " ][ {} ]".format(FormatHex(c))
-                        text = False
-                elif c == 0x03:
-                    if not text:
-                        block += "[ 03 {} ]".format(FormatHex(self.data[i]))
-                    else:
-                        block += " ][ 03 {} ]".format(FormatHex(self.data[i]))
-                        text = False
-                    i += 1
-                else:
-                    if not text:
-                        block += "["
-                        text = True
-                    block += " {}".format(FormatHex(c))
-                if c == 0x00:
-                    block += "\"\n\""
-                if c == 0xff:
-                    break
+        textFns = {
+            0: self.getTextNormal,
+            1: self.getTextCoffee,
+            2: self.getTextStaff,
+        }
+        fn = textFns.get(dataType)
+        assert fn, f"Invalid text type {dataType}"
+        block, end = fn(i, stop)
 
         # Check if it's referencing a location in memory.
         for pattern in PATTERNS:
@@ -683,7 +587,126 @@ class CCScriptWriter:
                         self.pointers.append(a)
                         idx += 4
 
-        return [block, i - start], i
+        return [block, end - start], end
+
+    def getTextNormal(self, i: int, stop: int):
+        blockParts = []
+        normal_block_expect_02 = False
+
+        while i < stop:
+            c = self.data[i]
+            i += 1
+            breakOut = False
+
+            # Check if it's a control code.
+            if c <= 0x30:
+                code = CONTROL_CODES[c]
+                if isinstance(code, int):
+                    length = code
+                else:
+                    length = self.getLength(i)
+
+                # Mark if we expect an [02] before the end of the block
+                if c == 0x19 and self.data[i] == 0x02:
+                    normal_block_expect_02 = True
+
+                # Get the text for the control code.
+                byteStrs = [FormatHex(self.data[offs + i]) for offs in range(-1, length)]
+                ccText = f"[{' '.join(byteStrs)}]"
+                i += length
+
+                # Stop if this is a block-ending character.
+                if c == 0x02 and normal_block_expect_02:
+                    # But don't stop if we expect an [02] that doesn't end the block
+                    normal_block_expect_02 = False
+                elif c in {0x02, 0x0A}:
+                    breakOut = True
+                elif self.splitjumps:
+                    if BRANCHING_CODES_RE.match(ccText):
+                        breakOut = True
+            # Check if it's a special character.
+            elif c in {0x52, 0x8b, 0x8c, 0x8d}:
+                ccText = f"[{FormatHex(c)}]"
+            # Looks like it's a normal character.
+            else:
+                ccText = chr(c - 0x30)
+
+            blockParts.append(ccText)
+            if breakOut:
+                break
+
+        return ''.join(blockParts), i
+
+    def getTextCoffee(self, i: int, stop: int):
+        blockParts = []
+
+        while i < stop:
+            c = self.data[i]
+            i += 1
+            breakOut = False
+
+            # End of text block.
+            if c == 0x00:
+                ccText = "[ 00 ]"
+                breakOut = True
+            # Move the text over a distance noted by XX.
+            elif c == 0x01:
+                ccText = "[ 01 {} ]".format(FormatHex(self.data[i]))
+                i += 1
+            # Move the text down a distance noted by XX.
+            elif c == 0x02:
+                ccText = "[ 02 {} ]".format(FormatHex(self.data[i]))
+                i += 1
+            # Print the name of character XX (01 = Ness, XX[1,4]).
+            elif c == 0x08:
+                ccText = "[ 08 {} ]".format(FormatHex(self.data[i]))
+                i += 1
+            # Drop down one line.
+            elif c == 0x09:
+                ccText = "[ 09 ]"
+            # Looks like it's a normal character.
+            else:
+                ccText = chr(c - 0x30)
+
+            blockParts.append(ccText)
+            if breakOut:
+                break
+
+        return ''.join(blockParts), i
+
+    def getTextStaff(self, i: int, stop: int):
+        blockParts = []
+        text = False
+
+        while i < stop:
+            c = self.data[i]
+            i += 1
+            breakOut = False
+            if c in (0x00, 0x01, 0x02, 0x04, 0xff):
+                if not text:
+                    ccText = "[ {} ]".format(FormatHex(c))
+                else:
+                    ccText = " ][ {} ]".format(FormatHex(c))
+                    text = False
+            elif c == 0x03:
+                if not text:
+                    ccText = "[ 03 {} ]".format(FormatHex(self.data[i]))
+                else:
+                    ccText = " ][ 03 {} ]".format(FormatHex(self.data[i]))
+                    text = False
+                i += 1
+            else:
+                ccText = f"{'[' if not text else ''} {FormatHex(c)}"
+                text = True
+            if c == 0x00:
+                ccText += "\"\n\""
+            if c == 0xff:
+                breakOut = True
+            blockParts.append(ccText)
+            if breakOut:
+                break
+
+        return ''.join(blockParts), i
 
     # Gets the length of a control code with variable length.
     def getLength(self, i):
