@@ -87,6 +87,20 @@ REPLACE = [["[13][02]\"", "\" end"], ["[03][00]", "\" next\n\""],
 RE_REPLACE = [r"\[(0[4|5|7])( \w\w \w\w)\]",
               r"\[(10|18 01|18 03|0E|0B|0C)( \w\w)\]",
               r"\[(1F 02|1F 00 00|1F 07])( \w\w)\]"]
+RE_REPLACE_TARGETS = {
+    "04":       "{{set(flag {})}}",
+    "05":       "{{unset(flag {})}}",
+    "07":       "{{isset(flag {})}}",
+    "10":       "{{pause({})}}",
+    "18 01":    "{{window_open({})}}",
+    "18 03":    "{{window_switch({})}}",
+    "0E":       "{{counter({})}}",
+    "0B":       "{{result_is({})}}",
+    "0C":       "{{result_not({})}}",
+    "1F 02":    "{{sound({})}}",
+    "1F 00 00": "{{music({})}}",
+    "1F 07":    "{{music_effect({})}}",
+}
 
 COILSNAKE_FILES = ["attract_mode_txt.yml", "battle_action_table.yml",
                    "enemy_configuration_table.yml", "map_doors.yml",
@@ -449,6 +463,8 @@ class CCScriptWriter:
                                    FormatHex(self.data[a + 7]),
                                    FormatHex(self.data[a + 8])))
                 t = 1
+            else:
+                assert False
             m = self.dataFiles[address]
             h = hex(address)
             self.asmPointers[a] = ["{}.l_{}".format(m, h), t]
@@ -807,63 +823,41 @@ class CCScriptWriter:
             pointer = matchObj.groups()[1]
             address = FromSNES(pointer)
             if not address:
-                return "[{}00 00 00 00]".format(prefix)
+                return f"[{prefix}00 00 00 00]"
             m = self.dataFiles[address]
             h = hex(address)
             if prefix == "0A " and not self.raw:
-                return "\" goto({}.l_{}) \"".format(m, h)
+                return f"\" goto({m}.l_{h}) \""
             elif prefix == "08 " and not self.raw:
-                return "\" call({}.l_{}) \"".format(m, h)
+                return f"\" call({m}.l_{h}) \""
             else:
-                return "[{}{{e({}.l_{})}}]".format(prefix, m, h)
+                return f"[{prefix}{{e({m}.l_{h})}}]"
         else:
             pointers = matchObj.groups()[1].split()
-            returnString = "[{}".format(prefix)
+            returnStringParts = [f"[{prefix}"]
             i = 0
             while i < len(pointers):
                 address = FromSNES(" ".join(map(str, pointers[i:i + 4])))
                 if address <= 0:
-                    returnString += " 00 00 00 00"
+                    returnStringParts.append(" 00 00 00 00")
                 else:
-                    returnString += " {{e({}.l_{})}}".format(
-                                                      self.dataFiles[address],
-                                                      hex(address))
+                    m = self.dataFiles[address]
+                    h = hex(address)
+                    returnStringParts.append(f" {{e({m}.l_{h})}}")
                 i += 4
             if len(matchObj.groups()) == 4:
-                returnString += matchObj.groups()[3]
-            returnString += "]"
-            return returnString
+                returnStringParts.append(matchObj.groups()[3])
+            returnStringParts.append("]")
+            return "".join(returnStringParts)
 
     # Replace with CCScript syntax.
     def replaceWithCCScript(self, matchObj):
 
-        t = matchObj.groups()[0]
-        a = FromSNES(matchObj.groups()[1])
-        if t == "04":
-            return "{{set(flag {})}}".format(a)
-        elif t == "05":
-            return "{{unset(flag {})}}".format(a)
-        elif t == "07":
-            return "{{isset(flag {})}}".format(a)
-        elif t == "10":
-            return "{{pause({})}}".format(a)
-        elif t == "18 01":
-            return "{{window_open({})}}".format(a)
-        elif t == "18 03":
-            return "{{window_switch({})}}".format(a)
-        elif t == "0E":
-            return "{{counter({})}}".format(a)
-        elif t == "0B":
-            return "{{result_is({})}}".format(a)
-        elif t == "0C":
-            return "{{result_not({})}}".format(a)
-        elif t == "1F 02":
-            return "{{sound({})}}".format(a)
-        elif t == "1F 00 00":
-            return "{{music({})}}".format(a)
-        elif t == "1F 07":
-            return "{{music_effect({})}}".format(a)
-
+        cc = matchObj.group(1)
+        value = FromSNES(matchObj.group(2))
+        template = RE_REPLACE_TARGETS.get(cc)
+        assert template
+        return template.format(value)
 
 ########
 # MAIN #
