@@ -12,7 +12,6 @@ from importlib.metadata import version
 import math
 import os
 import re
-import sys
 import time
 
 import yaml
@@ -258,6 +257,29 @@ def test_ToSNES():
     assert ToSNES(0x0100_0000) == '00 00 00 01'
     assert ToSNES(0xcafe_f00d) == '0D F0 FE CA'
 
+COILSNAKE_POINTER_RE = re.compile(r'(?:\$|data_\w\w\.l_0x)([0-9A-Fa-f]{1,6})$')
+def CoilSnakePointerStringToInt(pointerStr: str) -> int:
+    m = COILSNAKE_POINTER_RE.match(pointerStr)
+    if not m:
+        raise ValueError(f"Unable to parse CoilSnake project pointer \"{pointerStr}\" as integer. "
+                         "Is this a clean (freshly decompiled) project?")
+    return int(m.group(1), base=16)
+
+def test_CoilSnakePointerStringToInt():
+    assert CoilSnakePointerStringToInt('$123456') == 0x123456
+    assert CoilSnakePointerStringToInt('$aabbcc') == 0xaabbcc
+    assert CoilSnakePointerStringToInt('$AABBCC') == 0xaabbcc
+    assert CoilSnakePointerStringToInt('$AaBbCc') == 0xaabbcc
+    assert CoilSnakePointerStringToInt('data_00.l_0x123456') == 0x123456
+    assert CoilSnakePointerStringToInt('data_00.l_0xaabbcc') == 0xaabbcc
+    assert CoilSnakePointerStringToInt('data_00.l_0xAABBCC') == 0xaabbcc
+    assert CoilSnakePointerStringToInt('data_00.l_0xAaBbCc') == 0xaabbcc
+    try:
+        CoilSnakePointerStringToInt('newtext.mylabel')
+        assert False
+    except ValueError:
+        pass
+
 ##################
 # CCScriptWriter #
 ##################
@@ -301,8 +323,7 @@ class CCScriptWriter:
             pass
 
         if self.data is None:
-            print("Invalid EarthBound ROM. Aborting.")
-            sys.exit(1)
+            raise ValueError("Invalid EarthBound ROM. Aborting.")
 
     # Loads the dialogue from the text banks in the ROM.
     def loadDialogue(self, loadCoilSnake=False):
@@ -380,7 +401,8 @@ class CCScriptWriter:
                                    FormatHex(self.data[a + 8])))
                 t = 1
             else:
-                assert False
+                assert False, (f"ROM at ${a:#06x} doesn't look like an ASM address load. "
+                               "Is this a vanilla ROM?")
             m = self.dataFiles[address]
             h = hex(address)
             self.asmPointers[a] = ["{}.l_{}".format(m, h), t]
@@ -392,10 +414,9 @@ class CCScriptWriter:
         try:
             with open(project, "r", encoding="utf8"):
                 pass
-        except IOError:
-            print("Failed to open \"{}\". Invalid CoilSnake project. "
-                    "Aborting.".format(project))
-            sys.exit(1)
+        except IOError as exc:
+            raise ValueError(f"Failed to open \"{project}\". Invalid CoilSnake project. "
+                             "Aborting.") from exc
         # pylint: disable=too-many-nested-blocks
         for fileName in COILSNAKE_FILES:
             with open(os.path.join(o, fileName), "r", encoding="utf8") as csFile:
@@ -403,14 +424,11 @@ class CCScriptWriter:
             if fileName != "map_doors.yml":
                 for v in yamlData.values():
                     for p in COILSNAKE_POINTERS:
-                        if p in v:
-                            try:
-                                pointer = int(v[p][1:], 16)
-                                if pointer > 0xc00000 \
-                                    and pointer not in self.dialogue:
-                                    self.pointers.append(pointer)
-                            except ValueError:
-                                self.pointers.append(int(v[p][12:], 16))
+                        if p not in v:
+                            continue
+                        pointer = CoilSnakePointerStringToInt(v[p])
+                        if pointer >= 0xc00000 and pointer not in self.dialogue:
+                            self.pointers.append(pointer)
             else:
                 p = "Text Pointer"
                 for v in yamlData.values():
@@ -418,14 +436,11 @@ class CCScriptWriter:
                         if not d:
                             continue
                         for k in d:
-                            if p in k:
-                                try:
-                                    pointer = int(k[p][1:], 16)
-                                    if pointer > 0xc00000 \
-                                        and pointer not in self.dialogue:
-                                        self.pointers.append(pointer)
-                                except ValueError:
-                                    self.pointers.append(int(k[p][12:], 16))
+                            if p not in k:
+                                continue
+                            pointer = CoilSnakePointerStringToInt(k[p])
+                            if pointer >= 0xc00000 and pointer not in self.dialogue:
+                                self.pointers.append(pointer)
 
     # Performs various replacements on the dialogue blocks.
     def processDialogue(self):
@@ -527,17 +542,19 @@ class CCScriptWriter:
                 for e, v in yamlData.items():
                     pointers = {}
                     for p in COILSNAKE_POINTERS:
-                        if p in v:
-                            try:
-                                pointers[p] = int(v[p][1:], 16)
-                                if pointers[p] < 0xc00000:
-                                    del pointers[p]
-                            except ValueError:
-                                pointers[p] = int(v[p][12:], 16)
-                    if not pointers:
-                        continue
+                        if p not in v:
+                            continue
+                        ptr = CoilSnakePointerStringToInt(v[p])
+                        if ptr >= 0xc00000:
+                            pointers[p] = ptr
                     for k, v in pointers.items():
-                        f = self.dataFiles[v]
+                        try:
+                            f = self.dataFiles[v]
+                        except KeyError as exc:
+                            raise ValueError(
+                                f"While processing {fileName} entry {e}, couldn't find a data CCS "
+                                f"file containing `l_{hex(v)}. Are you decompiling to an "
+                                "unmodified project?") from exc
                         yamlData[e][k] = "{}.l_{}".format(f, hex(v))
             else:
                 p = "Text Pointer"
@@ -547,23 +564,25 @@ class CCScriptWriter:
                             continue
                         for n, k in enumerate(d):
                             pointers = {}
-                            if p in k:
-                                try:
-                                    pointers[p] = int(k[p][1:], 16)
-                                    if pointers[p] < 0xc00000:
-                                        del pointers[p]
-                                except ValueError:
-                                    pointers[p] = int(k[p][12:], 16)
-                            if not pointers:
+                            if p not in k:
                                 continue
+                            ptr = CoilSnakePointerStringToInt(k[p])
+                            if ptr >= 0xc00000:
+                                pointers[p] = ptr
                             for a, b in pointers.items():
-                                f = self.dataFiles[b]
+                                try:
+                                    f = self.dataFiles[b]
+                                except KeyError as exc:
+                                    raise ValueError(
+                                        f"While processing {fileName} sector {e}.{s} door {n}, "
+                                        f"couldn't find a data CCS file containing 'l_{hex(b)}'. "
+                                        "Is this a valid label?") from exc
                                 yamlData[e][s][n][a] = "{}.l_{}".format(f,
                                                                         hex(b))
             output = yaml.dump(yamlData, default_flow_style=False,
                     Dumper=yaml.CSafeDumper)
             output = re.sub(r"Event Flag: (\d+)",
-                lambda i: "Event Flag: " + hex(int(i.group(0)[12:])), output)
+                lambda i: "Event Flag: " + hex(int(i.group(1))), output)
             with open(os.path.join(o, fileName), "w", encoding="utf8") as csFile:
                 csFile.write(output)
 
