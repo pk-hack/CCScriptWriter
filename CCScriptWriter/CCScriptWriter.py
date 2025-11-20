@@ -1,19 +1,29 @@
-#! /usr/bin/env python
-# CCScriptWriter
-# Extracts the dialogue from EarthBound and outputs it into a CCScript file.
+#!/usr/bin/env python
+'''
+CCScriptWriter
+Extracts the dialogue from EarthBound and outputs it into a CCScript file.
+'''
 
 import argparse
 import array
+from enum import Enum
+from functools import reduce
 from importlib.metadata import version
 import math
 import os
 import re
-import sys
 import time
 
 import yaml
-from functools import reduce
 
+##############
+# DATA TYPES #
+##############
+
+class TextType(Enum):
+    Normal = 1
+    Coffee = 2
+    Staff = 3
 
 #############
 # CONSTANTS #
@@ -52,11 +62,7 @@ CONTROL_CODES = {0x00: 0, 0x01: 0, 0x02: 0, 0x03: 0, 0x04: 2, 0x05: 2, 0x06: 6,
                  0x2c: 0, 0x2d: 0, 0x2e: 0, 0x2f: 0, 0x30: 0}
 
 # per JTolmar
-BRANCHING_CODES = [[0x06],
-                   [0x09],
-                   [0x1B,0x02],
-                   [0x1B,0x03],
-                   [0x1F,0xC0]]
+BRANCHING_CODES_RE = re.compile(r'\[(?:0[69]|1B 0[23]|1F C0)')
 
 PATTERNS = [r"\[(06 \w\w \w\w )(\w\w \w\w \w\w \w\w)]",
             r"\[(08 )(\w\w \w\w \w\w \w\w)]",
@@ -68,23 +74,109 @@ PATTERNS = [r"\[(06 \w\w \w\w )(\w\w \w\w \w\w \w\w)]",
             r"\[(1F C0 \w\w)(( \w\w \w\w \w\w \w\w)+)\]"]
 REPLACE = [["[13][02]\"", "\" end"], ["[03][00]", "\" next\n\""],
            ["[00]", "\" linebreak\n\""], ["[01]", "\" newline\n\""],
-           ["[02]\"", "\" eob"], ["[0F]", "{inc}"], ["[0D 00]", "{rtoarg}"],
-           ["[0D 01]", "{ctoarg}"], ["[12]", "{clearline}"], ["[13]", "{wait}"],
-           ["[14]", "{prompt}"], ["[18 00]", "{window_closetop}"],
-           ["[18 04]", "{window_closeall}"], ["[18 06]", "{window_clear}"],
-           ["[18 0A]", "{open_wallet}"], ["[1B 00]", "{store_registers}"],
-           ["[1B 01]", "{load_registers}"], ["[1B 04]", "{swap}"],
-           ["[1C 04]", "{open_hp}"], ["[1C 0D]", "{user}"],
-           ["[1C 0E]", "{target}"], ["[1C 0F]", "{delta}"],
-           ["[1C 08 01]  ", "{smash}"], ["[1C 08 02]  ", "{youwon}"],
-           ["[1F 01 02]", "{music_stop}"], ["[1F 03]", "{music_resume}"],
-           ["[1F 05]", "{music_switching_off}"],
-           ["[1F 06]", "{music_switching_on}"], ["[1F B0]", "{save}"],
-           ["[1F 30]", "{font_normal}"], ["[1F 31]", "{font_saturn}"],
+           ["[02]\"", "\" eob"], ["[1C 08 01]  ", "{smash}",],
+           ["[1C 08 02]  ", "{youwon}",],
            [" \"\"", ""], [" \"\" ", " "], [" \"\"", ""], ["\"\" ", ""]]
-RE_REPLACE = [r"\[(0[4|5|7])( \w\w \w\w)\]",
-              r"\[(10|18 01|18 03|0E|0B|0C)( \w\w)\]",
-              r"\[(1F 02|1F 00 00|1F 07])( \w\w)\]"]
+RE_REPLACE = [
+    # no parameters
+    re.compile(r"\[(0D 0[01]|0F|1[234]|18 0[046A]|1B 0[014]|1C 0[4DEF]|"
+                  r"1F (?:01 02|0[356]|3[01]|B0))\]"),
+    # flag parameter
+    re.compile(r"\[(0[4|5|7]) (\w\w \w\w)\]"),
+    # one parameter
+    re.compile(r"\[(0[BCE]|10|18 0[13]|1C 0[01256]|1C 12|"
+                  r"1F (?:00 00|0[247]|1[12D]|21|41|67|E5|EC FF)) (\w\w)\]"),
+    # 1F EB xx 06
+    re.compile(r"\[(1F EB) (\w\w) 06\]"),
+    # two parameters
+    re.compile(r"\[(18 05|1D 0[015]|1E 0[0-8A-E]|1F (?:13|20|71|81|EC)) (\w\w) (\w\w)\]"),
+]
+RE_REPLACE_TARGETS = {
+    # no parameters
+    "0D 00":    "{{rtoarg}}",
+    "0D 01":    "{{ctoarg}}",
+    "0F":       "{{inc}}",
+    "12":       "{{clearline}}",
+    "13":       "{{wait}}",
+    "14":       "{{prompt}}",
+    "18 00":    "{{window_closetop}}",
+    "18 04":    "{{window_closeall}}",
+    "18 06":    "{{window_clear}}",
+    "18 0A":    "{{open_wallet}}",
+    "1B 00":    "{{store_registers}}",
+    "1B 01":    "{{load_registers}}",
+    "1B 04":    "{{swap}}",
+    "1C 04":    "{{open_hp}}",
+    "1C 0D":    "{{user}}",
+    "1C 0E":    "{{target}}",
+    "1C 0F":    "{{delta}}",
+    "1F 01 02": "{{music_stop}}",
+    "1F 03":    "{{music_resume}}",
+    "1F 05":    "{{music_switching_off}}",
+    "1F 06":    "{{music_switching_on}}",
+    "1F 30":    "{{font_normal}}",
+    "1F 31":    "{{font_saturn}}",
+    "1F B0":    "{{save}}",
+
+    # flag
+    "04":       "{{set(flag {})}}",
+    "05":       "{{unset(flag {})}}",
+    "07":       "{{isset(flag {})}}",
+
+    # one parameter
+    "0B":       "{{result_is({})}}",
+    "0C":       "{{result_not({})}}",
+    "0E":       "{{counter({})}}",
+    "10":       "{{pause({})}}",
+    "18 01":    "{{window_open({})}}",
+    "18 03":    "{{window_switch({})}}",
+    "1C 00":    "{{text_color({})}}",
+    "1C 01":    "{{stat({})}}",
+    "1C 02":    "{{name({})}}",
+    "1C 05":    "{{itemname({})}}",
+    "1C 06":    "{{teleportname({})}}",
+    "1C 12":    "{{psiname({})}}",
+    "1F 00 00": "{{music({})}}",
+    "1F 02":    "{{sound({})}}",
+    "1F 04":    "{{text_blips({})}}",
+    "1F 07":    "{{music_effect({})}}",
+    "1F 11":    "{{party_add({})}}",
+    "1F 12":    "{{party_remove({})}}",
+    "1F 1D":    "{{hide_char_float({})}}",
+    "1F 21":    "{{warp({})}}",
+    "1F 41":    "{{event({})}}",
+    "1F 67":    "{{hotspot_off({})}}",
+    "1F E5":    "{{lock_movement({})}}",
+    "1F EC FF": "{{show_party({})}}",
+
+    # 1F EB xx 06
+    "1F EB":    "{{hide_char({})}}",
+
+    # two-argument
+    "18 05":    "{{text_pos({}, {})}}",
+    "1D 00":    "{{give({}, {})}}",
+    "1D 01":    "{{take({}, {})}}",
+    "1D 05":    "{{hasitem({}, {})}}",
+    "1E 00":    "{{heal_percent({}, {})}}",
+    "1E 01":    "{{hurt_percent({}, {})}}",
+    "1E 02":    "{{heal({}, {})}}",
+    "1E 03":    "{{hurt({}, {})}}",
+    "1E 04":    "{{recoverpp_percent({}, {})}}",
+    "1E 05":    "{{consumepp_percent({}, {})}}",
+    "1E 06":    "{{recoverpp({}, {})}}",
+    "1E 07":    "{{consumepp({}, {})}}",
+    "1E 08":    "{{change_level({}, {})}}",
+    "1E 0A":    "{{boost_iq({}, {})}}",
+    "1E 0B":    "{{boost_guts({}, {})}}",
+    "1E 0C":    "{{boost_speed({}, {})}}",
+    "1E 0D":    "{{boost_vitality({}, {})}}",
+    "1E 0E":    "{{boost_luck({}, {})}}",
+    "1F 13":    "{{char_direction({}, {})}}",
+    "1F 20":    "{{teleport({}, {})}}",
+    "1F EC":    "{{show_char({}, {})}}",
+    "1F 71":    "{{learnpsi({}, {})}}",
+    "1F 81":    "{{usable({}, {})}}",
+}
 
 COILSNAKE_FILES = ["attract_mode_txt.yml", "battle_action_table.yml",
                    "enemy_configuration_table.yml", "map_doors.yml",
@@ -103,220 +195,90 @@ SPECIAL_POINTERS = [0x49ea4, 0x49ea8, 0x49eac, 0x49eb0, 0x49eb4, 0x49eb8,
 
 ASM_POINTERS = [0x49dbd, 0x49dc9, 0x4f252]
 
-HEADER = """/*
+HEADER = f"""/*
  * EarthBound Text Dump
- * Time: {}
+ * Time: {time.strftime("%H:%M:%S - %d/%m/%Y")}
  * Generated using CCScriptWriter.
  */
 
-""".format(time.strftime("%H:%M:%S - %d/%m/%Y"))
+"""
 
 
 #####################
 # UTILITY FUNCTIONS #
 #####################
 
-# Find the closest and lowest key.
 def FindClosest(dictionary, searchKey):
-
-    lower = 0
+    "Find the closest and lowest key."
+    lower = None
     for key in sorted(dictionary):
-        if searchKey - key >= 0:
+        if searchKey >= key:
             lower = key
         else:
-            higher = key
-    return lower, higher
+            break
+    return lower
 
-# Format a hex number to a control code format.
+def test_FindClosest():
+    assert FindClosest([10,20,30], 9) is None
+    assert FindClosest([10,20,30], 15) == 10
+    assert FindClosest([10,20,30], 19) == 10
+    assert FindClosest([10,20,30], 20) == 20
+    assert FindClosest([10,20,30], 21) == 20
+    assert FindClosest([10,20,30], 10000) == 30
+
 def FormatHex(intNum):
+    "Format a hex number to a control code format."
+    return '{:02X}'.format(intNum)
 
-    hexNum = hex(intNum).lstrip("0x").upper()
-    if not hexNum:
-        hexNum = "00"
-    elif len(hexNum) == 1:
-        hexNum = "0{}".format(hexNum)
-    return hexNum
-
-# Converts an SNES address to a hexadecimal address.
 def FromSNES(snesNum):
-
-    if snesNum.count("0") == 8:
-        return 0
+    "Converts an SNES address to a hexadecimal address."
     return int("".join(reversed(snesNum.strip().split())), 16)
 
-# Converts a hexadecimal address to an SNES address.
-def ToSNES(hexNum):
+def test_FromSNES():
+    assert 0 == FromSNES('00 00 00 00')
+    assert 1 == FromSNES('01 00 00 00')
+    assert 256 == FromSNES('00 01 00 00')
+    assert 0x0001_0000 == FromSNES('00 00 01 00')
+    assert 0x0100_0000 == FromSNES('00 00 00 01')
+    assert 0xcafe_f00d == FromSNES('0D F0 FE CA')
+    assert 0xcafe_f00d == FromSNES('0d f0 fe ca')
 
+def ToSNES(hexNum):
+    "Converts a hexadecimal address to an SNES address."
     if hexNum == 0:
         return "00 00 00 00"
-    h = hex(hexNum).lstrip("0x").upper()
-    return " ".join(reversed(re.findall("\w\w", "{0:0>8}".format(h))))
+    return " ".join(reversed(re.findall(r"\w\w", "{:08X}".format(hexNum))))
 
-########################################
-# Arg matching + replacement functions #
-########################################
+def test_ToSNES():
+    assert ToSNES(0) == '00 00 00 00'
+    assert ToSNES(1) == '01 00 00 00'
+    assert ToSNES(256) == '00 01 00 00'
+    assert ToSNES(0x0001_0000) == '00 00 01 00'
+    assert ToSNES(0x0100_0000) == '00 00 00 01'
+    assert ToSNES(0xcafe_f00d) == '0D F0 FE CA'
 
-# essentially, the problem is that the args are in different formats and counts
-# so they're basically impossible to match with something like a normal regular expression
-# 
-# we don't want to build an AST yet, if we can avoid it. So... We'll have to just
-# break things down. Painfully.
-#
-# The complexity here wants an AST to be walked. That really is the proper way to do this.
-# Later refactors should consider just building the AST and walking it instead of asking
-# "how do we make these functions more efficient?"
-#
-# you can rename these, just aggressively avoiding name collisions
-#
-# ~greysondn@github, 22 August 2021
+COILSNAKE_POINTER_RE = re.compile(r'(?:\$|data_\w\w\.l_0x)([0-9A-Fa-f]{1,6})$')
+def CoilSnakePointerStringToInt(pointerStr: str) -> int:
+    m = COILSNAKE_POINTER_RE.match(pointerStr)
+    if not m:
+        raise ValueError(f"Unable to parse CoilSnake project pointer \"{pointerStr}\" as integer. "
+                         "Is this a clean (freshly decompiled) project?")
+    return int(m.group(1), base=16)
 
-def grey_replace(ccScriptCommand, before, after, maxdist, block, replaceFunc):
-    # this is actually the outer wrapper
-    # ccscriptcommand - given to replaceFunc
-    # before - text before
-    # after - text after
-    # maximum distance after `before` that `after` can be.
-    # block - the source block to replace in
-    # replaceFunc - function used to generate replacement text, f(ccArgsText, ccScriptCommand)
-    ret  = block            # maybe not necessary, but helps track the eventual return
-    blen = len(before)      # shorter name, no function call for val
-    alen = len(after)       # same
-
-    # seed var for loop context
-    found       = True
-    minlocation = 0
-
-    # we're going to find all instances
-    while found:
-        # we've not found this during this iteration
-        found = False
-
-        # try to find start
-        location = ret[minlocation:].find(before)
-
-        if (-1 != location):
-            # means we found start
-            # try to find end
-            location = location + minlocation
-            minlocation = location + 1
-            dist = ret[(location + blen):].find(after)
-
-            if (-1 != dist):
-                # we've found a start and an end, now to just figure out the
-                # middle and replace it
-                found = True
-                
-                # we can only replace if it's less than the max distance
-                if (dist <= maxdist):
-                    # the segment we'll replace
-                    toReplace = ret[location:(location+blen+alen+dist)]
-
-                    # just the part with args
-                    # and just in case user is awful, strip whitespace from it
-                    argContent = toReplace[blen:blen+dist].strip()
-
-                    # use replaceFunc to generate the replacement text
-                    replaceWith = replaceFunc(argContent, ccScriptCommand)
-
-                    # actually replace it
-                    # it might be safe to remove the count limit
-                    ret = ret.replace(toReplace, replaceWith, 1)
-
-    # didn't find any/any more
-    # return whatever we wound up with
-    return ret
-
-def grey_replaceByteArgs(byteArgs, ccScriptCommand):
-    # eventually
-    ret = "{" + ccScriptCommand + "("
-    
-    # split
-    bArgs = byteArgs.split()
-
-    # convert to int..?
-    for i in range(len(bArgs)):
-        # first is different
-        if (i > 0):
-            ret = ret + ", "
-        
-        # convert to int, then to string, then staple to ret
-        ret = ret + str(int(bArgs[i], 16))
-
-    # end paren
-    ret = ret + ")}"
-
-    # done
-    return ret
-
-def grey_replace_all(block):
-    # ------------
-    # setup return
-    # ------------
-    ret = block
-
-    # ---------
-    # byte args
-    # ---------
-    
-    # text control
-    ret = grey_replace("itemname",     "[1C 05 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("name",         "[1C 02 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("psiname",      "[1C 12 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("stat",         "[1C 01 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("teleportname", "[1C 06 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("text_blips",   "[1F 04 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("text_color",   "[1C 00 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("text_pos",     "[18 05 ", "]", 5, ret, grey_replaceByteArgs)
-
-    # goods and money
-    ret = grey_replace("give",    "[1D 00 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("hasitem", "[1D 05 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("take",    "[1D 01 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("usable",  "[1F 81 ", "]", 5, ret, grey_replaceByteArgs)
-
-    # stats
-    ret = grey_replace("boost_guts",        "[1E 0B ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("boost_iq",          "[1E 0A ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("boost_luck",        "[1E 0E ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("boost_speed",       "[1E 0C ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("boost_vitality",    "[1E 0D ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("change_level",      "[1E 08 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("consumepp",         "[1E 07 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("consumepp_percent", "[1E 05 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("heal",              "[1E 02 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("heal_percent",      "[1E 00 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("hurt",              "[1E 03 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("hurt_percent",      "[1E 01 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("recoverpp",         "[1E 06 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("recoverpp_percent", "[1E 04 ", "]", 5, ret, grey_replaceByteArgs)
-    
-    # sound and music
-    ret = grey_replace("music",        "[1F 00 00 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("music_effect", "[1F 07 ",    "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("sound",        "[1F 02 ",    "]", 2, ret, grey_replaceByteArgs)
-
-    # gameplay control
-    ret = grey_replace("event",         "[1F 41 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("hotspot_off",   "[1F 67 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("learnpsi",      "[1F 71 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("lock_movement", "[1F E5 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("party_add",     "[1F 11 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("party_remove",  "[1F 12 ", "]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("teleport",      "[1F 20 ", "]", 5, ret, grey_replaceByteArgs)
-    ret = grey_replace("warp",          "[1F 21 ", "]", 2, ret, grey_replaceByteArgs)
-
-    # visual effects
-    ret = grey_replace("show_party", "[1F EC FF ", "]", 2, ret, grey_replaceByteArgs)
-
-    ret = grey_replace("char_direction",  "[1F 13 ", "]",    5, ret, grey_replaceByteArgs)
-    ret = grey_replace("show_char",       "[1F EC ", "]",    5, ret, grey_replaceByteArgs)
-    ret = grey_replace("hide_char",       "[1F EB ", " 06]", 2, ret, grey_replaceByteArgs)
-    ret = grey_replace("hide_char_float", "[1F 1D ", "]",    2, ret, grey_replaceByteArgs)
-
-    # --------
-    # end func
-    # --------
-    return ret
+def test_CoilSnakePointerStringToInt():
+    assert CoilSnakePointerStringToInt('$123456') == 0x123456
+    assert CoilSnakePointerStringToInt('$aabbcc') == 0xaabbcc
+    assert CoilSnakePointerStringToInt('$AABBCC') == 0xaabbcc
+    assert CoilSnakePointerStringToInt('$AaBbCc') == 0xaabbcc
+    assert CoilSnakePointerStringToInt('data_00.l_0x123456') == 0x123456
+    assert CoilSnakePointerStringToInt('data_00.l_0xaabbcc') == 0xaabbcc
+    assert CoilSnakePointerStringToInt('data_00.l_0xAABBCC') == 0xaabbcc
+    assert CoilSnakePointerStringToInt('data_00.l_0xAaBbCc') == 0xaabbcc
+    try:
+        CoilSnakePointerStringToInt('newtext.mylabel')
+        assert False
+    except ValueError:
+        pass
 
 ##################
 # CCScriptWriter #
@@ -361,8 +323,7 @@ class CCScriptWriter:
             pass
 
         if self.data is None:
-            print("Invalid EarthBound ROM. Aborting.")
-            sys.exit(1)
+            raise ValueError("Invalid EarthBound ROM. Aborting.")
 
     # Loads the dialogue from the text banks in the ROM.
     def loadDialogue(self, loadCoilSnake=False):
@@ -371,55 +332,18 @@ class CCScriptWriter:
         print("Loading dialogue...")
         for section in TEXT_DATA:
             i = section[0]
-            dataType = 0
-            if section[0] == 0x210000 or section[0] == 0x210652 \
-              or section[0] == 0x210b86:
-                dataType = 1
+            dataType = TextType.Normal
+            if section[0] in {0x210000, 0x210652, 0x210b86}:
+                dataType = TextType.Coffee
             elif section[0] == 0x21413f:
-                dataType = 2
+                dataType = TextType.Staff
             while i < section[1]:
                 block = i + 0xc00000
                 self.dialogue[block], i = self.getText(i, None, dataType)
 
         # Optionally load the CoilSnake pointers.
         if loadCoilSnake:
-            o = os.path.join(self.outputDirectory, os.path.pardir)
-            project = os.path.join(o, "Project.snake")
-            try:
-                with open(project) as f: pass
-            except IOError:
-                print("Failed to open \"{}\". Invalid CoilSnake project. "
-                      "Aborting.".format(project))
-                sys.exit(1)
-            for fileName in COILSNAKE_FILES:
-                csFile = open(os.path.join(o, fileName), "r")
-                yamlData = yaml.load(csFile, Loader=yaml.CSafeLoader)
-                csFile.close()
-                if fileName != "map_doors.yml":
-                    for e, v in yamlData.items():
-                        for p in COILSNAKE_POINTERS:
-                            if p in v:
-                                try:
-                                    pointer = int(v[p][1:], 16)
-                                    if pointer > 0xc00000 \
-                                       and pointer not in self.dialogue:
-                                        self.pointers.append(pointer)
-                                except ValueError:
-                                    self.pointers.append(int(v[p][12:], 16))
-                else:
-                    p = "Text Pointer"
-                    for e, v in yamlData.items():
-                        for s, d in v.items():
-                            if not d: continue
-                            for k in d:
-                                if p in k:
-                                    try:
-                                        pointer = int(k[p][1:], 16)
-                                        if pointer > 0xc00000 \
-                                           and pointer not in self.dialogue:
-                                            self.pointers.append(pointer)
-                                    except ValueError:
-                                        self.pointers.append(int(k[p][12:], 16))
+            self.loadCoilSnakeDialogue()
 
         # Find the special pointed-to locations.
         for p in SPECIAL_POINTERS:
@@ -438,10 +362,8 @@ class CCScriptWriter:
             if address in pointers:
                 pointers.remove(address)
         for pointer in pointers:
-            try:
-                lower, higher = FindClosest(self.dialogue, pointer)
-            except UnboundLocalError:
-                continue
+            lower = FindClosest(self.dialogue, pointer)
+            assert lower is not None, f"Unable to find closest block for pointer {pointer:#06x}"
             block, i = self.getText(lower - 0xc00000, pointer - 0xc00000)
             self.dialogue[lower] = ["{}[0A {}]".format(block[0],
                                                        ToSNES(pointer)),
@@ -478,16 +400,54 @@ class CCScriptWriter:
                                    FormatHex(self.data[a + 7]),
                                    FormatHex(self.data[a + 8])))
                 t = 1
+            else:
+                assert False, (f"ROM at ${a:#06x} doesn't look like an ASM address load. "
+                               "Is this a vanilla ROM?")
             m = self.dataFiles[address]
             h = hex(address)
             self.asmPointers[a] = ["{}.l_{}".format(m, h), t]
+
+    def loadCoilSnakeDialogue(self):
+        "Load pointers from the CoilSnake project."
+        o = os.path.join(self.outputDirectory, os.path.pardir)
+        project = os.path.join(o, "Project.snake")
+        try:
+            with open(project, "r", encoding="utf8"):
+                pass
+        except IOError as exc:
+            raise ValueError(f"Failed to open \"{project}\". Invalid CoilSnake project. "
+                             "Aborting.") from exc
+        # pylint: disable=too-many-nested-blocks
+        for fileName in COILSNAKE_FILES:
+            with open(os.path.join(o, fileName), "r", encoding="utf8") as csFile:
+                yamlData = yaml.load(csFile, Loader=yaml.CSafeLoader)
+            if fileName != "map_doors.yml":
+                for v in yamlData.values():
+                    for p in COILSNAKE_POINTERS:
+                        if p not in v:
+                            continue
+                        pointer = CoilSnakePointerStringToInt(v[p])
+                        if pointer >= 0xc00000 and pointer not in self.dialogue:
+                            self.pointers.append(pointer)
+            else:
+                p = "Text Pointer"
+                for v in yamlData.values():
+                    for d in v.values():
+                        if not d:
+                            continue
+                        for k in d:
+                            if p not in k:
+                                continue
+                            pointer = CoilSnakePointerStringToInt(k[p])
+                            if pointer >= 0xc00000 and pointer not in self.dialogue:
+                                self.pointers.append(pointer)
 
     # Performs various replacements on the dialogue blocks.
     def processDialogue(self):
 
         print("Processing dialogue...")
         f = self.replaceWithLabel
-        for block in self.dialogue:
+        for block in self.dialogue: # pylint: disable=consider-using-dict-items
             b = self.dialogue[block][0]
             b = "\"{}\"".format(b)
 
@@ -509,8 +469,7 @@ class CCScriptWriter:
                     b = b.replace(r[0], r[1])
                 for r in RE_REPLACE:
                     b = re.sub(r, self.replaceWithCCScript, b)
-                b = grey_replace_all(b)
-                
+
             self.dialogue[block][0] = b
 
     # Outputs the processed dialogue to the specified output directory.
@@ -523,50 +482,48 @@ class CCScriptWriter:
         o = self.outputDirectory
 
         # Prepare the main file containing ROM addresses.
-        mainFile = open(os.path.join(o, "main.ccs"), "w")
-        m = mainFile.write
-        m(HEADER)
-        m("// DO NOT EDIT THIS FILE.\n")
-        m("\ncommand e(label) \"{long label}\"")
-        m("\ncommand _lasmptr(loc,target) {\n    ROMTBL[loc, 1, 1] = short [0] "
-          "target\n    ROMTBL[loc, 7, 1] = short [1] target\n}")
+        with open(os.path.join(o, "main.ccs"), "w", encoding="utf8") as mainFile:
+            m = mainFile.write
+            m(HEADER)
+            m("// DO NOT EDIT THIS FILE.\n")
+            m("\ncommand e(label) \"{long label}\"")
+            m("\ncommand _lasmptr(loc,target) {\n    ROMTBL[loc, 1, 1] = short [0] "
+            "target\n    ROMTBL[loc, 7, 1] = short [1] target\n}")
 
-        # Output each data_xx.ccs file.
-        numFiles = math.ceil(len(self.dialogue) / 100)
-        i = 0
-        while i <= numFiles:
-            f = "data_{0:0>2}.".format(i)
-            fileName = "{}ccs".format(f)
-            dataFile = open(os.path.join(o, fileName), "w")
-            d = dataFile.write
-            d(HEADER)
-            d("command e(label) \"{long label}\"\n")
-            d("\n// Text Data\n")
-            dialogue = sorted(self.dialogue)[i * 100:i * 100 + 100]
-            m("\n\n// Memory Overwriting: {}".format(fileName))
-            for block in dialogue:
-                d("l_{}:\n".format(hex(block)))
-                lines = self.dialogue[block][0].split("\n")
-                for line in lines:
-                    l = line.replace(f, "")
-                    d("    {}\n".format(l))
-                d("\n")
-                if self.dialogue[block][1] >= 5:
-                    m("\nROM[{}] = goto({}l_{})".format(hex(block), f,
-                                                        hex(block)))
-            dataFile.close()
-            i += 1
+            # Output each data_xx.ccs file.
+            numFiles = math.ceil(len(self.dialogue) / 100)
+            i = 0
+            while i <= numFiles:
+                f = f"data_{i:02}."
+                fileName = f"{f}ccs"
+                with open(os.path.join(o, fileName), "w", encoding="utf8") as dataFile:
+                    d = dataFile.write
+                    d(HEADER)
+                    d("command e(label) \"{long label}\"\n")
+                    d("\n// Text Data\n")
+                    dialogue = sorted(self.dialogue)[i * 100:i * 100 + 100]
+                    m("\n\n// Memory Overwriting: {}".format(fileName))
+                    for block in dialogue:
+                        d("l_{}:\n".format(hex(block)))
+                        lines = self.dialogue[block][0].split("\n")
+                        for line in lines:
+                            l = line.replace(f, "")
+                            d("    {}\n".format(l))
+                        d("\n")
+                        if self.dialogue[block][1] >= 5:
+                            m("\nROM[{}] = goto({}l_{})".format(hex(block), f,
+                                                                hex(block)))
+                i += 1
 
-        # Take care of the special pointers (both SNES and ASM type).
-        m("\n\n// Special Pointers")
-        for k, p in self.specialPointers.items():
-            m("\nROM[{}] = \"{}\"".format(hex(k + 0xc00000), p))
-        for k, p in self.asmPointers.items():
-            if p[1] == 0:
-                m("\n_asmptr({}, {})".format(hex(k + 0xc00000), p[0]))
-            elif p[1] == 1:
-                m("\n_lasmptr({}, {})".format(hex(k + 0xc00000), p[0]))
-        mainFile.close()
+            # Take care of the special pointers (both SNES and ASM type).
+            m("\n\n// Special Pointers")
+            for k, p in self.specialPointers.items():
+                m("\nROM[{}] = \"{}\"".format(hex(k + 0xc00000), p))
+            for k, p in self.asmPointers.items():
+                if p[1] == 0:
+                    m("\n_asmptr({}, {})".format(hex(k + 0xc00000), p[0]))
+                elif p[1] == 1:
+                    m("\n_lasmptr({}, {})".format(hex(k + 0xc00000), p[0]))
 
         # Optionally output to the CoilSnake project.
         if outputCoilSnake:
@@ -577,162 +534,75 @@ class CCScriptWriter:
 
         print("Modifying CoilSnake project...")
         o = os.path.join(self.outputDirectory, os.path.pardir)
+        # pylint: disable=too-many-nested-blocks
         for fileName in COILSNAKE_FILES:
-            csFile = open(os.path.join(o, fileName), "r")
-            yamlData = yaml.load(csFile, Loader=yaml.CSafeLoader)
+            with open(os.path.join(o, fileName), "r", encoding="utf8") as csFile:
+                yamlData = yaml.load(csFile, Loader=yaml.CSafeLoader)
             if fileName != "map_doors.yml":
                 for e, v in yamlData.items():
                     pointers = {}
                     for p in COILSNAKE_POINTERS:
-                        if p in v:
-                            try:
-                                pointers[p] = int(v[p][1:], 16)
-                                if pointers[p] < 0xc00000:
-                                    del pointers[p]
-                            except ValueError:
-                                pointers[p] = int(v[p][12:], 16)
-                    if not pointers:
-                        continue
+                        if p not in v:
+                            continue
+                        ptr = CoilSnakePointerStringToInt(v[p])
+                        if ptr >= 0xc00000:
+                            pointers[p] = ptr
                     for k, v in pointers.items():
-                        f = self.dataFiles[v]
+                        try:
+                            f = self.dataFiles[v]
+                        except KeyError as exc:
+                            raise ValueError(
+                                f"While processing {fileName} entry {e}, couldn't find a data CCS "
+                                f"file containing `l_{hex(v)}. Are you decompiling to an "
+                                "unmodified project?") from exc
                         yamlData[e][k] = "{}.l_{}".format(f, hex(v))
             else:
                 p = "Text Pointer"
                 for e, v in yamlData.items():
                     for s, d in v.items():
-                        if not d: continue
+                        if not d:
+                            continue
                         for n, k in enumerate(d):
                             pointers = {}
-                            if p in k:
-                                try:
-                                    pointers[p] = int(k[p][1:], 16)
-                                    if pointers[p] < 0xc00000:
-                                        del pointers[p]
-                                except ValueError:
-                                    pointers[p] = int(k[p][12:], 16)
-                            if not pointers:
+                            if p not in k:
                                 continue
+                            ptr = CoilSnakePointerStringToInt(k[p])
+                            if ptr >= 0xc00000:
+                                pointers[p] = ptr
                             for a, b in pointers.items():
-                                f = self.dataFiles[b]
+                                try:
+                                    f = self.dataFiles[b]
+                                except KeyError as exc:
+                                    raise ValueError(
+                                        f"While processing {fileName} sector {e}.{s} door {n}, "
+                                        f"couldn't find a data CCS file containing 'l_{hex(b)}'. "
+                                        "Is this a valid label?") from exc
                                 yamlData[e][s][n][a] = "{}.l_{}".format(f,
                                                                         hex(b))
-            csFile = open(os.path.join(o, fileName), "w")
             output = yaml.dump(yamlData, default_flow_style=False,
-                      Dumper=yaml.CSafeDumper)
-            output = re.sub("Event Flag: (\d+)",
-                   lambda i: "Event Flag: " + hex(int(i.group(0)[12:])), output)
-            csFile.write(output)
-            csFile.close()
+                    Dumper=yaml.CSafeDumper)
+            output = re.sub(r"Event Flag: (\d+)",
+                lambda i: "Event Flag: " + hex(int(i.group(1))), output)
+            with open(os.path.join(o, fileName), "w", encoding="utf8") as csFile:
+                csFile.write(output)
 
     # Gets the text at a specified location in memory; if stop is specified, it
     # will forcibly stop looking once it is reached. The third parameter
     # specifies whether the data block is a normal block, a coffee scene type
     # block or a staff list block.
-    def getText(self, i, stop=None, dataType=False):
+    def getText(self, i, stop=None, dataType=TextType.Normal):
 
-        block = ""
         start = i
-        text = False
-        normal_block_expect_02 = False
+        stop = stop or 0xFFFF_FFFF
 
-        while True:
-            if stop and stop == i:
-                break
-            c = self.data[i]
-            initialI = i
-            i += 1
-            # Is it a normal block?
-            if dataType == 0:
-                # Check if it's a control code.
-                if c <= 0x30:
-                    code = CONTROL_CODES[c]
-                    if isinstance(code, int):
-                        length = code
-                    else:
-                        length = self.getLength(i)
-                    block += "[{}".format(FormatHex(c))
-
-                    # Mark if we expect an [02] before the end of the block
-                    if c == 0x19 and self.data[i] == 0x02:
-                        normal_block_expect_02 = True
-
-                    # Get the rest of the control code.
-                    codeEnd = i + length
-                    while i < codeEnd:
-                        block += " {}".format(FormatHex(self.data[i]))
-                        i += 1
-                    block += "]"
-
-                    # Stop if this is a block-ending character.
-                    if c == 0x02 and normal_block_expect_02:
-                        # But don't stop if we expect an [02] that doesn't end the block
-                        normal_block_expect_02 = False
-                    elif c == 0x02 or c == 0x0A:
-                        break
-                    elif self.splitjumps:
-                        whilebreak = False
-                        for codesequence in BRANCHING_CODES:
-                            if c == codesequence[0]:
-                                if (len(codesequence) == 1):
-                                    whilebreak = True
-                                    break
-                                elif (self.data[initialI+1] == codesequence[1]):#presumes max sequence length of 2
-                                    whilebreak = True
-                                    break
-                        if whilebreak:
-                            break
-                # Check if it's a special character.
-                elif c == 0x52 or c == 0x8b or c == 0x8c or c == 0x8d:
-                    block += "[{}]".format(FormatHex(c))
-                # Looks like it's a normal character.
-                else:
-                    block += chr(c - 0x30)
-            elif dataType == 1:
-                # End of text block.
-                if c == 0x00:
-                    block += "[ 00 ]"
-                    break
-                # Move the text over a distance noted by XX.
-                elif c == 0x01:
-                    block += "[ 01 {} ]".format(FormatHex(self.data[i]))
-                    i += 1
-                # Move the text down a distance noted by XX.
-                elif c == 0x02:
-                    block += "[ 02 {} ]".format(FormatHex(self.data[i]))
-                    i += 1
-                # Print the name of character XX (01 = Ness, XX[1,4]).
-                elif c == 0x08:
-                    block += "[ 08 {} ]".format(FormatHex(self.data[i]))
-                    i += 1
-                # Drop down one line.
-                elif c == 0x09:
-                    block += "[ 09 ]"
-                # Looks like it's a normal character.
-                else:
-                    block += chr(c - 0x30)
-            elif dataType == 2:
-                if c in (0x00, 0x01, 0x02, 0x04, 0xff):
-                    if not text:
-                        block += "[ {} ]".format(FormatHex(c))
-                    else:
-                        block += " ][ {} ]".format(FormatHex(c))
-                        text = False
-                elif c == 0x03:
-                    if not text:
-                        block += "[ 03 {} ]".format(FormatHex(self.data[i]))
-                    else:
-                        block += " ][ 03 {} ]".format(FormatHex(self.data[i]))
-                        text = False
-                    i += 1
-                else:
-                    if not text:
-                        block += "["
-                        text = True
-                    block += " {}".format(FormatHex(c))
-                if c == 0x00:
-                    block += "\"\n\""
-                if c == 0xff:
-                    break
+        textFns = {
+            TextType.Normal: self.getTextNormal,
+            TextType.Coffee: self.getTextCoffee,
+            TextType.Staff: self.getTextStaff,
+        }
+        fn = textFns.get(dataType)
+        assert fn, f"Invalid text type {dataType}"
+        block, end = fn(i, stop)
 
         # Check if it's referencing a location in memory.
         for pattern in PATTERNS:
@@ -749,12 +619,132 @@ class CCScriptWriter:
                         self.pointers.append(a)
                         idx += 4
 
-        return [block, i - start], i
+        return [block, end - start], end
+
+    def getTextNormal(self, i: int, stop: int):
+        blockParts = []
+        normal_block_expect_02 = False
+
+        while i < stop:
+            c = self.data[i]
+            i += 1
+            breakOut = False
+
+            # Check if it's a control code.
+            if c <= 0x30:
+                code = CONTROL_CODES[c]
+                if isinstance(code, int):
+                    length = code
+                else:
+                    length = self.getLength(i)
+
+                # Mark if we expect an [02] before the end of the block
+                if c == 0x19 and self.data[i] == 0x02:
+                    normal_block_expect_02 = True
+
+                # Get the text for the control code.
+                byteStrs = [FormatHex(self.data[offs + i]) for offs in range(-1, length)]
+                ccText = f"[{' '.join(byteStrs)}]"
+                i += length
+
+                # Stop if this is a block-ending character.
+                if c == 0x02 and normal_block_expect_02:
+                    # But don't stop if we expect an [02] that doesn't end the block
+                    normal_block_expect_02 = False
+                elif c in {0x02, 0x0A}:
+                    breakOut = True
+                elif self.splitjumps:
+                    if BRANCHING_CODES_RE.match(ccText):
+                        breakOut = True
+            # Check if it's a special character.
+            elif c in {0x52, 0x8b, 0x8c, 0x8d}:
+                ccText = f"[{FormatHex(c)}]"
+            # Looks like it's a normal character.
+            else:
+                ccText = chr(c - 0x30)
+
+            blockParts.append(ccText)
+            if breakOut:
+                break
+
+        return ''.join(blockParts), i
+
+    def getTextCoffee(self, i: int, stop: int):
+        blockParts = []
+
+        while i < stop:
+            c = self.data[i]
+            i += 1
+            breakOut = False
+
+            # End of text block.
+            if c == 0x00:
+                ccText = "[ 00 ]"
+                breakOut = True
+            # Move the text over a distance noted by XX.
+            elif c == 0x01:
+                ccText = "[ 01 {} ]".format(FormatHex(self.data[i]))
+                i += 1
+            # Move the text down a distance noted by XX.
+            elif c == 0x02:
+                ccText = "[ 02 {} ]".format(FormatHex(self.data[i]))
+                i += 1
+            # Print the name of character XX (01 = Ness, XX[1,4]).
+            elif c == 0x08:
+                ccText = "[ 08 {} ]".format(FormatHex(self.data[i]))
+                i += 1
+            # Drop down one line.
+            elif c == 0x09:
+                ccText = "[ 09 ]"
+            # Looks like it's a normal character.
+            else:
+                ccText = chr(c - 0x30)
+
+            blockParts.append(ccText)
+            if breakOut:
+                break
+
+        return ''.join(blockParts), i
+
+    def getTextStaff(self, i: int, stop: int):
+        blockParts = []
+        text = False
+
+        while i < stop:
+            c = self.data[i]
+            i += 1
+            breakOut = False
+            if c in (0x00, 0x01, 0x02, 0x04, 0xff):
+                if not text:
+                    ccText = "[ {} ]".format(FormatHex(c))
+                else:
+                    ccText = " ][ {} ]".format(FormatHex(c))
+                    text = False
+            elif c == 0x03:
+                if not text:
+                    ccText = "[ 03 {} ]".format(FormatHex(self.data[i]))
+                else:
+                    ccText = " ][ 03 {} ]".format(FormatHex(self.data[i]))
+                    text = False
+                i += 1
+            else:
+                ccText = f"{'[' if not text else ''} {FormatHex(c)}"
+                text = True
+            if c == 0x00:
+                ccText += "\"\n\""
+            if c == 0xff:
+                breakOut = True
+            blockParts.append(ccText)
+            if breakOut:
+                break
+
+        return ''.join(blockParts), i
 
     # Gets the length of a control code with variable length.
     def getLength(self, i):
 
         c = self.data[i - 1]
+        combos = {}
         if c == 0x09:
             return 1 + self.data[i] * 4
         elif c == 0x1B:
@@ -808,10 +798,7 @@ class CCScriptWriter:
                       0x0C: 3, 0x0D: 4, 0x0E: 3, 0x0F: 3, 0x10: 3, 0x11: 3,
                       0x12: 3, 0x13: 3, 0x14: 5, 0x15: 3, 0x17: 5, 0x18: 2,
                       0x19: 2, 0x20: 1, 0x21: 2, 0x22: 1, 0x23: 2, 0x24: 2}
-        try:
-            return combos[self.data[i]]
-        except:
-            return 0
+        return combos.get(self.data[i], 0)
 
     # Replaces the compressed text control codes with their values.
     def replaceCompressedText(self, matchObj):
@@ -836,63 +823,41 @@ class CCScriptWriter:
             pointer = matchObj.groups()[1]
             address = FromSNES(pointer)
             if not address:
-                return "[{}00 00 00 00]".format(prefix)
+                return f"[{prefix}00 00 00 00]"
             m = self.dataFiles[address]
             h = hex(address)
             if prefix == "0A " and not self.raw:
-                return "\" goto({}.l_{}) \"".format(m, h)
+                return f"\" goto({m}.l_{h}) \""
             elif prefix == "08 " and not self.raw:
-                return "\" call({}.l_{}) \"".format(m, h)
+                return f"\" call({m}.l_{h}) \""
             else:
-                return "[{}{{e({}.l_{})}}]".format(prefix, m, h)
+                return f"[{prefix}{{e({m}.l_{h})}}]"
         else:
             pointers = matchObj.groups()[1].split()
-            returnString = "[{}".format(prefix)
+            returnStringParts = [f"[{prefix}"]
             i = 0
             while i < len(pointers):
                 address = FromSNES(" ".join(map(str, pointers[i:i + 4])))
                 if address <= 0:
-                    returnString += " 00 00 00 00"
+                    returnStringParts.append(" 00 00 00 00")
                 else:
-                    returnString += " {{e({}.l_{})}}".format(
-                                                      self.dataFiles[address],
-                                                      hex(address))
+                    m = self.dataFiles[address]
+                    h = hex(address)
+                    returnStringParts.append(f" {{e({m}.l_{h})}}")
                 i += 4
             if len(matchObj.groups()) == 4:
-                returnString += matchObj.groups()[3]
-            returnString += "]"
-            return returnString
+                returnStringParts.append(matchObj.groups()[3])
+            returnStringParts.append("]")
+            return "".join(returnStringParts)
 
     # Replace with CCScript syntax.
     def replaceWithCCScript(self, matchObj):
 
-        t = matchObj.groups()[0]
-        a = FromSNES(matchObj.groups()[1])
-        if t == "04":
-            return "{{set(flag {})}}".format(a)
-        elif t == "05":
-            return "{{unset(flag {})}}".format(a)
-        elif t == "07":
-            return "{{isset(flag {})}}".format(a)
-        elif t == "10":
-            return "{{pause({})}}".format(a)
-        elif t == "18 01":
-            return "{{window_open({})}}".format(a)
-        elif t == "18 03":
-            return "{{window_switch({})}}".format(a)
-        elif t == "0E":
-            return "{{counter({})}}".format(a)
-        elif t == "0B":
-            return "{{result_is({})}}".format(a)
-        elif t == "0C":
-            return "{{result_not({})}}".format(a)
-        elif t == "1F 02":
-            return "{{sound({})}}".format(a)
-        elif t == "1F 00 00":
-            return "{{music({})}}".format(a)
-        elif t == "1F 07":
-            return "{{music_effect({})}}".format(a)
-
+        cc, *valueStrs = matchObj.groups()
+        values = [FromSNES(v) for v in valueStrs]
+        template = RE_REPLACE_TARGETS.get(cc)
+        assert template
+        return template.format(*values)
 
 ########
 # MAIN #
@@ -931,10 +896,10 @@ def main():
             output = os.path.join(args.output, "ccscript")
         else:
             output = args.output
-        main = CCScriptWriter(args.rom, output, args.raw, args.splitjumps)
-        main.loadDialogue(args.coilsnake)
-        main.processDialogue()
-        main.outputDialogue(args.coilsnake)
+        writer = CCScriptWriter(args.rom, output, args.raw, args.splitjumps)
+        writer.loadDialogue(args.coilsnake)
+        writer.processDialogue()
+        writer.outputDialogue(args.coilsnake)
         print("Complete. Time: {:.2f}s".format(float(time.time() - start)))
     except KeyboardInterrupt:
         print("\rProgram execution aborted.")
