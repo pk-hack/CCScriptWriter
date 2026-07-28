@@ -191,9 +191,11 @@ COILSNAKE_POINTERS = ["Text Address", "Death Text Pointer",
                       "Delivery Success Text Pointer", "Pointer"]
 
 SPECIAL_POINTERS = [0x49ea4, 0x49ea8, 0x49eac, 0x49eb0, 0x49eb4, 0x49eb8,
-                    0x49ebc, 0x49ec0, 0xcffd5]
+                    0x49ebc, 0x49ec0]
 
 ASM_POINTERS = [0x49dbd, 0x49dc9, 0x4f252]
+
+MOVEMENT_POINTERS = [0x3d44b]
 
 HEADER = f"""/*
  * EarthBound Text Dump
@@ -280,6 +282,7 @@ def test_CoilSnakePointerStringToInt():
     except ValueError:
         pass
 
+
 ##################
 # CCScriptWriter #
 ##################
@@ -294,6 +297,7 @@ class CCScriptWriter:
         self.data = array.array("B")
         self.dialogue = {}
         self.dataFiles = {}
+        self.movementPointers = {}
         self.outputDirectory = outputDirectory
         self.pointers = []
         self.raw = raw
@@ -353,6 +357,13 @@ class CCScriptWriter:
                 address += " {}".format(FormatHex(self.data[i]))
                 i += 1
             self.pointers.append(FromSNES(address))
+        for p in MOVEMENT_POINTERS:
+            # The "queue text" ASM at C0A88D expects to see the address with the high word first,
+            # then the low word. FromSNES needs the bytes of the low word first.
+            address = bytearray(self.data[p+2:p+4])
+            address.extend(self.data[p+0:p+2])
+            address_str = ' '.join([FormatHex(a) for a in address])
+            self.pointers.append(FromSNES(address_str))
 
         # Add new blocks as needed by the pointers.
         print("Checking pointers...")
@@ -406,6 +417,12 @@ class CCScriptWriter:
             m = self.dataFiles[address]
             h = hex(address)
             self.asmPointers[a] = ["{}.l_{}".format(m, h), t]
+        for p in MOVEMENT_POINTERS:
+            address = bytearray(self.data[p+2:p+4])
+            address.extend(self.data[p+0:p+2])
+            address_int = int.from_bytes(address, 'little')
+            module = self.dataFiles[address_int]
+            self.movementPointers[p] = "{{short [1] {0}.l_{1}}}{{short [0] {0}.l_{1}}}".format(module, hex(address_int))
 
     def loadCoilSnakeDialogue(self):
         "Load pointers from the CoilSnake project."
@@ -524,6 +541,8 @@ class CCScriptWriter:
                     m("\n_asmptr({}, {})".format(hex(k + 0xc00000), p[0]))
                 elif p[1] == 1:
                     m("\n_lasmptr({}, {})".format(hex(k + 0xc00000), p[0]))
+            for k, p in self.movementPointers.items():
+                m("\nROM[{}] = \"{}\"".format(hex(k + 0xc00000), p))
 
         # Optionally output to the CoilSnake project.
         if outputCoilSnake:
